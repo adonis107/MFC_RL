@@ -1,1 +1,1 @@
-The README will be updated asap.
+The README will be updated asap. Will contain all of the basis of the project with a nice presentation of the structure project.
