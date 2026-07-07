@@ -7,20 +7,20 @@ import torch
 # Attributes
 @dataclass
 class TwoStateConfig:
-    T: int
-    lam0: float
-    lam1: float
-    lam: int
-    target_p: float
-
-    low: float
-    high: float
-
-    q_sigma: float
-    q_clip: float
-
     device: torch.device
     dtype: torch.dtype
+    
+    T: int = 2
+    lam0: float = 0.5
+    lam1: float = 0.8
+    lam: int = 10
+    target_p: float = 0.6
+
+    low: float = 0.1
+    high: float = 0.9
+
+    q_sigma: float = 1.0
+    q_clip: float = 1e-8
 
 
 # Environment
