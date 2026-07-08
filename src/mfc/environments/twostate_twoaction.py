@@ -49,7 +49,7 @@ class TwoStateMFC:
         self.n_actions = 2
 
         self.switch_probs = torch.tensor([config.lam0, config.lam1], dtype=config.dtype, device=config.device)
-        self.target_B = torch.tensor([1.0 - config.target_p, config.target_p], dtype=config.dtype, device=config.device)
+        self.target_B = torch.tensor([config.target_p, 1.0 - config.target_p], dtype=config.dtype, device=config.device)
 
     def policy_probs(self, theta: torch.Tensor) -> torch.Tensor:
         """Static policy pi_theta(a|x), where theta is a 2D tensor of shape (n_states, n_actions)."""
@@ -96,12 +96,12 @@ class TwoStateMFC:
     def reward(self, state: int, mu: torch.Tensor, action: int | None = None) -> torch.Tensor:
         """
         r(x,a,mu) = 1_{x=1} - mu(1)^2 - lambda * W1(mu, B).
-        On {0, 1} with the usual distance, W1(mu, Bernoulli(p)) = |mu(1) - p|.
+        On {0, 1} with the usual distance, W1(mu, B) = |mu(1) - B(1)|.
         """
         x_reward = torch.tensor(1.0 if state == 1 else 0.0, dtype=self.config.dtype, device=self.config.device)
 
         mu1 = mu[1]
-        w1 = torch.abs(mu1 - self.config.target_p)
+        w1 = torch.abs(mu1 - self.target_B[1])
 
         return x_reward - mu1**2 - self.config.lam * w1
 
