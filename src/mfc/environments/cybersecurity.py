@@ -37,6 +37,14 @@ class CybersecurityConfig:
     DI, DS, UI, US = range(4)
     KEEP, UPDATE = range(2)
 
+    N: int = 200 # Trajectories for MF-REINFORCE
+    n: int = 1 # Trajectory for the gradient of logits estimation
+
+    lr: float = 1e-3 # Learning rate
+    n_train: int = 20_000 # Number of epochs
+    training_runs: int = 5 # Number of independent training runs for each epsilon value
+    validate_every: int = 10 # Freeze the policy and sample a validation episode, for which we compute the population reward starting from a fixed initial distribution
+
 
 # Environment
 class CybersecurityPolicy(torch.nn.Module):
@@ -121,8 +129,11 @@ class CybersecurityMFC:
         probs = probs / probs.sum()
         return int(torch.multinomial(probs, num_samples=1).item())
 
-    def reward(self, state: int, mu: torch.Tensor) -> torch.Tensor:
+    def reward(self, state: int, mu: torch.Tensor, action: int | None = None) -> torch.Tensor:
         return self.reward_by_state[state]
+
+    def terminal_reward(self, state: int, mu: torch.Tensor) -> torch.Tensor:
+        return self.reward(state, mu)
 
     def policy_score(self, policy: CybersecurityPolicy, t: int, mu: torch.Tensor, state: int, action: int) -> torch.Tensor:
         logp = torch.log(policy.probs(t, mu)[state, action].clamp_min(1e-12))

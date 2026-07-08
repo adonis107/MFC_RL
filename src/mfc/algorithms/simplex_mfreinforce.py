@@ -115,14 +115,14 @@ class SimplexPerturbedMFREINFORCE:
                 q_t = self.sample_q()
                 M_t = (1.0 - eps_law) * mu_flow[t] + eps_law * q_t
                 a = self.env.sample_action(control, t, x, M_t)
-                total_return += self.discount(t) * self.env.reward(x, M_t)
+                total_return += self.discount(t) * self.env.reward(x, M_t, a)
                 score_pol += self.env.policy_score(control, t, M_t.detach(), x, a).detach().reshape(-1)
                 x = self.env.sample_next_state(x, a, M_t)
                 q_path.append(q_t)
 
             q_T = self.sample_q()
             M_T = (1.0 - eps_law) * mu_flow[horizon] + eps_law * q_T
-            total_return += self.discount(horizon) * self.env.reward(x, M_T)
+            total_return += self.discount(horizon) * self.env.terminal_reward(x, M_T)
             q_path.append(q_T)
 
             score_pert = torch.zeros(param_dim, dtype=self.config.dtype, device=self.config.device)

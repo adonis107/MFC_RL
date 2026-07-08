@@ -22,6 +22,14 @@ class TwoStateConfig:
     q_sigma: float = 1.0
     q_clip: float = 1e-8
 
+    N: int = 200 # Main perturbed trajectories for MF-REINFORCE
+    n: int = 10 # Trajectories for the gradient of logits estimation
+
+    lr: float = 1e-3 # Learning rate
+    n_train: int = 5_000 # Number of epochs
+    training_runs: int = 5 # Number of independent training runs for each epsilon value
+    validate_every: int = 10 # Freeze the policy and sample a validation episode, for which we compute the population reward starting from a fixed initial distribution
+
 
 # Environment
 class TwoStateMFC:
@@ -85,7 +93,7 @@ class TwoStateMFC:
 
         return K
     
-    def reward(self, state: int, mu: torch.Tensor) -> torch.Tensor:
+    def reward(self, state: int, mu: torch.Tensor, action: int | None = None) -> torch.Tensor:
         """
         r(x,a,mu) = 1_{x=1} - mu(1)^2 - lambda * W1(mu, B).
         On {0, 1} with the usual distance, W1(mu, Bernoulli(p)) = |mu(1) - p|.
@@ -96,6 +104,9 @@ class TwoStateMFC:
         w1 = torch.abs(mu1 - self.config.target_p)
 
         return x_reward - mu1**2 - self.config.lam * w1
+
+    def terminal_reward(self, state: int, mu: torch.Tensor) -> torch.Tensor:
+        return self.reward(state, mu)
 
     def exact_population_flow(self, theta: torch.Tensor, mu0: torch.Tensor) -> torch.Tensor:
         """Computes mu_t exactly using the averaged kernel."""
