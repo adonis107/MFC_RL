@@ -1,1 +1,2 @@
 from .simplex_mfreinforce import SimplexPerturbedMFREINFORCE
+from .logits_mfreinforce import LogitsPerturbedMFREINFORCE
