@@ -8,6 +8,7 @@ class LogitsPerturbedMFREINFORCE:
     """
     Mean-Field REINFORCE for Finite-Horizon MFMDP.
     From: Meunier, M., Pham, H. and Reisinger, C., 2026. Model-free policy gradient for discrete-time mean-field control. arXiv preprint arXiv:2601.11217.
+    This algorithm is model-free and estimates the population flow.
     """
 
     def __init__(self, env):
