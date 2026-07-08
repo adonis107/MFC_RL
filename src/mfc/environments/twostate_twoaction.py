@@ -81,7 +81,7 @@ class TwoStateMFC:
         
         return probs
     
-    def averaged_kernel(self, theta: torch.Tensor, mu: torch.Tensor) -> torch.Tensor:
+    def averaged_kernel(self, theta: torch.Tensor, t: int, mu: torch.Tensor) -> torch.Tensor:
         """K_theta(x'|x,mu)"""
         pi = self.policy_probs(theta)
         
@@ -113,7 +113,7 @@ class TwoStateMFC:
         mu_flow = [mu0]
 
         for t in range(self.config.T):
-            K = self.averaged_kernel(theta, mu_flow[-1])
+            K = self.averaged_kernel(theta, t, mu_flow[-1])
             mu_flow.append(mu_flow[-1] @ K)
 
         return torch.stack(mu_flow)

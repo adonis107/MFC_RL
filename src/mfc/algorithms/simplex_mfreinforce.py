@@ -1,6 +1,4 @@
 from __future__ import annotations
-
-from dataclasses import dataclass
 from typing import Dict, List, Literal, Optional, Tuple, Union
 
 import torch
@@ -43,14 +41,14 @@ class SimplexPerturbedMFREINFORCE:
 
     @torch.no_grad()
     def estimate_population_flow(self, control, mu0: torch.Tensor, n_particles: int, horizon: Optional[int] = None,) -> torch.Tensor:
-        if horizon is None: horizon = self.config.T
+        steps = self.config.T if horizon is None else horizon
         if n_particles <= 0: raise ValueError("n_particles must be positive.")
 
         states = torch.multinomial(mu0, num_samples=n_particles, replacement=True)
-        flow = torch.zeros(horizon + 1, self.n_states, dtype=self.config.dtype, device=self.config.device)
+        flow = torch.zeros(steps + 1, self.n_states, dtype=self.config.dtype, device=self.config.device)
         flow[0] = torch.bincount(states, minlength=self.n_states).to(self.config.dtype) / n_particles
 
-        for t in range(horizon):
+        for t in range(steps):
             mu_t = flow[t]
             next_states = torch.empty_like(states)
             for r in range(n_particles):

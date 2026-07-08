@@ -55,9 +55,10 @@ class DistributionPlanningMFC:
         self.n_states = config.n_states
         self.n_actions = config.n_actions
         self.actions = torch.tensor([-1, 0, 1], dtype=torch.long, device=config.device)
-        mu_target = [0.0, 0.0, 0.05, 0.1, 0.2, 0.3, 0.2, 0.1, 0.05, 0.0, 0.0] # From the original implementation of Carmona, Laurière, Tan [6]
-        self.target = torch.tensor(mu_target, dtype=config.dtype, device=config.device)
-
+        x = torch.arange(config.n_states, dtype=config.dtype, device=config.device)
+        target = torch.exp(-0.5 * ((x - 4.5) / 2.0).square())
+        self.target = target / target.sum()
+        
     def distribution_penalty(self, mu: torch.Tensor) -> torch.Tensor:
         return -(mu - self.target).square().sum()
 
