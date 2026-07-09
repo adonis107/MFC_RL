@@ -1,6 +1,7 @@
 # Folders
 .venv/
 files/
+models/
 
 # Notes
 *.md

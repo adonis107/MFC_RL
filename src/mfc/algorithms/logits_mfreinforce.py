@@ -26,6 +26,9 @@ class LogitsPerturbedMFREINFORCE:
             return grad_flat
         return grad_flat.reshape_as(control)
 
+    def discount(self, t: int) -> float:
+        return float(getattr(self.config, "gamma", 1.0) ** t)
+
     def logit(self, mu: torch.Tensor) -> torch.Tensor:
         return torch.log(mu)
 
@@ -161,10 +164,10 @@ class LogitsPerturbedMFREINFORCE:
 
         returns = torch.zeros(steps + 1, dtype=self.config.dtype, device=self.config.device)
         m_T = self.perturb_law(logit_flow[steps], epsilon, lambdas[steps])
-        returns[steps] = self.env.terminal_reward(int(y[steps].item()), m_T)
+        returns[steps] = self.discount(steps) * self.env.terminal_reward(int(y[steps].item()), m_T)
 
         for t in range(steps - 1, -1, -1):
-            returns[t] = rewards_y[t] + returns[t + 1]
+            returns[t] = self.discount(t) * rewards_y[t] + returns[t + 1]
 
         param_dim = self.parameter_vector(control).numel()
         grad_flat = torch.zeros(param_dim, dtype=self.config.dtype, device=self.config.device)
