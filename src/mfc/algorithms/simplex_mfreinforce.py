@@ -155,3 +155,24 @@ class SimplexPerturbedMFREINFORCE:
             "std_return": returns.std(unbiased=False),
             "grad_norm": torch.linalg.norm(grad_flat),
         }
+
+    def complete_gradient_estimate(
+        self,
+        control,
+        mu_flow: torch.Tensor,
+        eps_law: float,
+        B: int,
+        n_aux: int,
+        eta: Optional[float] = None,
+        baseline: Union[None, float, Literal["batch_mean"]] = "batch_mean",
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        eta_value = eps_law if eta is None else float(eta)
+        D_hat = self.estimate_sensitivity(control, mu_flow, eta_value, n_aux)
+        grad_hat, diag = self.gradient_estimate(control, mu_flow, D_hat, eps_law, B, baseline=baseline)
+        diag = dict(diag)
+        diag["sensitivity"] = D_hat
+        diag["eta"] = torch.tensor(eta_value, dtype=self.config.dtype, device=self.config.device)
+        diag["lambda"] = torch.tensor(float(eps_law), dtype=self.config.dtype, device=self.config.device)
+        diag["main_trajectories"] = torch.tensor(int(B), device=self.config.device)
+        diag["auxiliary_trajectories"] = torch.tensor(int(n_aux), device=self.config.device)
+        return grad_hat, diag
