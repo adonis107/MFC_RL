@@ -4,6 +4,8 @@ from typing import Optional
 
 import torch
 
+from ._neural_policy_scores import weighted_mlp_policy_score_sums
+
 
 @dataclass
 class DistributionPlanningConfig:
@@ -26,6 +28,7 @@ class DistributionPlanningConfig:
     lr: float = 1e-4 # Learning rate
     training_runs: int = 5 # Number of independent training runs for each epsilon value
     validate_every: int = 10 # Freeze the policy and sample a validation episode, for which we compute the population reward starting from a fixed initial distribution
+    keep_score_diagnostics: bool = False # Store full per-sample score tensors for debugging; expensive for neural policies.
 
 
 class DistributionPlanningPolicy(torch.nn.Module):
@@ -117,12 +120,20 @@ class DistributionPlanningMFC:
         transitions = self.transition_tensor(mu)
         return torch.einsum("...xa,...axy->...xy", pi, transitions)
 
+    def next_law(self, policy: DistributionPlanningPolicy, t: int, mu: torch.Tensor) -> torch.Tensor:
+        pi = self.action_probabilities(policy, t, mu)
+        state_action_mass = mu.unsqueeze(-1) * pi
+        next_mu = torch.zeros_like(mu)
+        for action_idx, move in enumerate(self.actions.tolist()):
+            next_mu = next_mu + torch.roll(state_action_mass[..., action_idx], shifts=int(move), dims=-1)
+        return next_mu
+
     def exact_population_flow(self, policy: DistributionPlanningPolicy, mu0: torch.Tensor, horizon: Optional[int] = None) -> torch.Tensor:
         if horizon is None:
             horizon = self.config.T
         flow = [mu0]
         for t in range(horizon):
-            flow.append(flow[-1] @ self.averaged_kernel(policy, t, flow[-1]))
+            flow.append(self.next_law(policy, t, flow[-1]))
         return torch.stack(flow)
 
     def exact_value(self, policy: DistributionPlanningPolicy, mu0: torch.Tensor, horizon: Optional[int] = None) -> torch.Tensor:
@@ -134,7 +145,7 @@ class DistributionPlanningMFC:
             pi = self.action_probabilities(policy, t, mu)
             move_penalty = (mu.unsqueeze(-1) * pi * self.action_costs.to(dtype=mu.dtype)).sum()
             value = value + self.distribution_penalty(mu) - move_penalty
-            mu = mu @ self.averaged_kernel(policy, t, mu)
+            mu = self.next_law(policy, t, mu)
         return value + self.terminal_reward(0, mu)
 
     @torch.no_grad()
@@ -208,3 +219,45 @@ class DistributionPlanningMFC:
             )
             chunks.append(torch.cat([g.reshape(end - start, -1) for g in grads], dim=1).detach())
         return torch.cat(chunks, dim=0).reshape(*states.shape, -1)
+
+    def policy_log_probs_batch(
+        self,
+        policy: DistributionPlanningPolicy,
+        t: int,
+        mu: torch.Tensor,
+        states: torch.Tensor,
+        actions: torch.Tensor,
+    ) -> torch.Tensor:
+        states_flat = states.reshape(-1)
+        actions_flat = actions.reshape(-1)
+        if mu.ndim == 1:
+            mu_flat = mu.unsqueeze(0).expand(states_flat.numel(), self.n_states)
+        else:
+            mu_flat = mu.reshape(states_flat.numel(), self.n_states)
+        logits = policy.forward(t, mu_flat)
+        log_probs = torch.log_softmax(logits, dim=-1)
+        idx = torch.arange(states_flat.numel(), device=states.device)
+        return log_probs[idx, states_flat, actions_flat].reshape_as(states)
+
+    def weighted_policy_score_sums(
+        self,
+        policy: DistributionPlanningPolicy,
+        t: int,
+        mu: torch.Tensor,
+        states: torch.Tensor,
+        actions: torch.Tensor,
+        weights: torch.Tensor,
+        chunk_size: int | None = None,
+    ) -> torch.Tensor:
+        return weighted_mlp_policy_score_sums(
+            policy,
+            t,
+            mu,
+            states,
+            actions,
+            weights,
+            self.n_states,
+            self.n_actions,
+            self.config.T,
+            chunk_size=chunk_size,
+        )

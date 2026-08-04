@@ -29,6 +29,7 @@ class TwoStateConfig:
     n_train: int = 10_000 # Number of epochs
     training_runs: int = 5 # Number of independent training runs for each epsilon value
     validate_every: int = 10 # Freeze the policy and sample a validation episode, for which we compute the population reward starting from a fixed initial distribution
+    keep_score_diagnostics: bool = False # Store full per-sample score tensors for debugging; expensive for neural policies.
 
 
 # Environment
@@ -146,17 +147,11 @@ class TwoStateMFC:
         """Exact finite-horizon population value under the static policy."""
         steps = self.config.T if horizon is None else horizon
         mu_flow = self.exact_population_flow(theta, mu0, steps)
-
-        value = torch.tensor(0.0, dtype=self.config.dtype, device=self.config.device)
-
-        for t in range(steps):
-            mu_t = mu_flow[t]
-            value += sum(mu_t[x] * self.reward(x, mu_t) for x in range(2))
-
-        mu_T = mu_flow[steps]
-        value += sum(mu_T[x] * self.reward(x, mu_T) for x in range(2))
-
-        return value
+        mu1 = mu_flow[..., 1]
+        distribution_rewards = -mu1.square() - self.config.lam * torch.abs(mu1 - self.target_B[1])
+        state_rewards = (mu_flow * self._state_rewards).sum(dim=-1)
+        population_rewards = state_rewards + distribution_rewards
+        return population_rewards[: steps + 1].sum()
     
     def sample_state(self, mu: torch.Tensor) -> int:
         return int(torch.multinomial(mu, num_samples=1).item())
@@ -167,6 +162,11 @@ class TwoStateMFC:
 
     @torch.no_grad()
     def sample_actions_batch(self, theta: torch.Tensor, t: int, states: torch.Tensor, mu: torch.Tensor) -> torch.Tensor:
+        if theta.ndim == 1:
+            states_flat = states.reshape(-1)
+            p_move = torch.sigmoid(theta)[states_flat]
+            return torch.bernoulli(p_move).to(dtype=torch.long).reshape_as(states)
+
         pi = self.action_probabilities(theta, t, mu)
         if pi.ndim == 2:
             probs = pi[states.reshape(-1)]
@@ -184,6 +184,16 @@ class TwoStateMFC:
 
     @torch.no_grad()
     def sample_next_states_batch(self, states: torch.Tensor, actions: torch.Tensor, mu: torch.Tensor) -> torch.Tensor:
+        states_flat = states.reshape(-1)
+        actions_flat = actions.reshape(-1)
+        switch_draws = torch.rand(states_flat.shape, dtype=self.config.dtype, device=states.device)
+        switch = (actions_flat == 1) & (switch_draws < self.switch_probs[states_flat])
+        next_states = states_flat.clone()
+        next_states[switch] = 1 - next_states[switch]
+        return next_states.reshape_as(states)
+
+    @torch.no_grad()
+    def _sample_next_states_batch_multinomial(self, states: torch.Tensor, actions: torch.Tensor, mu: torch.Tensor) -> torch.Tensor:
         transitions = self.transition_tensor(mu)
         states_flat = states.reshape(-1)
         actions_flat = actions.reshape(-1)
@@ -227,3 +237,42 @@ class TwoStateMFC:
         scores[rows, states_flat] = -pi[states_flat]
         scores[rows, states_flat, actions_flat] += 1.0
         return scores.reshape(*states.shape, -1)
+
+    def policy_log_probs_batch(
+        self,
+        theta: torch.Tensor,
+        t: int,
+        mu: torch.Tensor,
+        states: torch.Tensor,
+        actions: torch.Tensor,
+    ) -> torch.Tensor:
+        pi = self.action_probabilities(theta, t, mu)
+        states_flat = states.reshape(-1)
+        actions_flat = actions.reshape(-1)
+        if pi.ndim == 2:
+            probs = pi[states_flat, actions_flat]
+        else:
+            probs = pi.reshape(-1, self.n_states, self.n_actions)[
+                torch.arange(states_flat.numel(), device=states.device),
+                states_flat,
+                actions_flat,
+            ]
+        return torch.log(probs.clamp_min(1e-12)).reshape_as(states)
+
+    def weighted_policy_score_sums(
+        self,
+        theta: torch.Tensor,
+        t: int,
+        mu: torch.Tensor,
+        states: torch.Tensor,
+        actions: torch.Tensor,
+        weights: torch.Tensor,
+        chunk_size: int | None = None,
+    ) -> torch.Tensor:
+        states_flat = states.reshape(-1)
+        weights_flat = weights.to(dtype=theta.dtype, device=theta.device).reshape(-1, states_flat.numel())
+        scores = self.policy_scores_batch(theta, t, mu, states, actions).reshape(states_flat.numel(), -1)
+        sums = weights_flat @ scores
+        if weights.shape == states.shape:
+            return sums.squeeze(0)
+        return sums.reshape(*weights.shape[:-1], scores.shape[-1])

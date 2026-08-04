@@ -4,6 +4,8 @@ from typing import ClassVar, List
 
 import torch
 
+from ._neural_policy_scores import weighted_mlp_policy_score_sums
+
 
 # Attributes
 @dataclass
@@ -44,6 +46,7 @@ class CybersecurityConfig:
     n_train: int = 20_000 # Number of epochs
     training_runs: int = 5 # Number of independent training runs for each epsilon value
     validate_every: int = 10 # Freeze the policy and sample a validation episode, for which we compute the population reward starting from a fixed initial distribution
+    keep_score_diagnostics: bool = False # Store full per-sample score tensors for debugging; expensive for neural policies.
 
 
 # Environment
@@ -169,11 +172,14 @@ class CybersecurityMFC:
         return torch.stack(flow)
 
     def exact_value(self, policy: CybersecurityPolicy, mu0: torch.Tensor, horizon: int) -> torch.Tensor:
-        flow = self.exact_population_flow(policy, mu0, horizon)
         value = torch.zeros((), dtype=self.config.dtype, device=self.config.device)
+        mu = mu0
+        discount = 1.0
         for t in range(horizon):
-            value = value + (self.config.gamma ** t) * (flow[t] * self.reward_by_state).sum()
-        value = value + (self.config.gamma ** horizon) * (flow[horizon] * self.reward_by_state).sum()
+            value = value + discount * (mu * self.reward_by_state).sum()
+            mu = mu @ self.averaged_kernel(policy, t, mu)
+            discount *= self.config.gamma
+        value = value + discount * (mu * self.reward_by_state).sum()
         return value
 
     @torch.no_grad()
@@ -272,3 +278,45 @@ class CybersecurityMFC:
             )
             chunks.append(torch.cat([g.reshape(end - start, -1) for g in grads], dim=1).detach())
         return torch.cat(chunks, dim=0).reshape(*states.shape, -1)
+
+    def policy_log_probs_batch(
+        self,
+        policy: CybersecurityPolicy,
+        t: int,
+        mu: torch.Tensor,
+        states: torch.Tensor,
+        actions: torch.Tensor,
+    ) -> torch.Tensor:
+        states_flat = states.reshape(-1)
+        actions_flat = actions.reshape(-1)
+        if mu.ndim == 1:
+            mu_flat = mu.unsqueeze(0).expand(states_flat.numel(), self.n_states)
+        else:
+            mu_flat = mu.reshape(states_flat.numel(), self.n_states)
+        logits = policy.forward(t, mu_flat)
+        log_probs = torch.log_softmax(logits, dim=-1)
+        idx = torch.arange(states_flat.numel(), device=states.device)
+        return log_probs[idx, states_flat, actions_flat].reshape_as(states)
+
+    def weighted_policy_score_sums(
+        self,
+        policy: CybersecurityPolicy,
+        t: int,
+        mu: torch.Tensor,
+        states: torch.Tensor,
+        actions: torch.Tensor,
+        weights: torch.Tensor,
+        chunk_size: int | None = None,
+    ) -> torch.Tensor:
+        return weighted_mlp_policy_score_sums(
+            policy,
+            t,
+            mu,
+            states,
+            actions,
+            weights,
+            self.n_states,
+            self.n_actions,
+            self.config.T_val,
+            chunk_size=chunk_size,
+        )
