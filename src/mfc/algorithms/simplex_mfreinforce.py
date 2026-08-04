@@ -47,6 +47,47 @@ class SimplexPerturbedMFREINFORCE:
             return min(batch_size, 32)
         return min(batch_size, 128)
 
+    def _keep_score_diagnostics(self, keep_score_diagnostics: Optional[bool]) -> bool:
+        if keep_score_diagnostics is None:
+            return bool(getattr(self.config, "keep_score_diagnostics", False))
+        return bool(keep_score_diagnostics)
+
+    def _weighted_policy_score_sums(
+        self,
+        control,
+        t: int,
+        mu: torch.Tensor,
+        states: torch.Tensor,
+        actions: torch.Tensor,
+        weights: torch.Tensor,
+        chunk_size: int | None = None,
+    ) -> torch.Tensor:
+        if hasattr(self.env, "weighted_policy_score_sums"):
+            return self.env.weighted_policy_score_sums(
+                control,
+                t,
+                mu,
+                states,
+                actions,
+                weights,
+                chunk_size=chunk_size,
+            )
+
+        states_flat = states.reshape(-1)
+        scores = self.env.policy_scores_batch(
+            control,
+            t,
+            mu,
+            states,
+            actions,
+            chunk_size=chunk_size,
+        ).reshape(states_flat.numel(), -1)
+        weights_2d = weights.to(dtype=self.config.dtype, device=self.config.device).reshape(-1, states_flat.numel())
+        sums = weights_2d @ scores
+        if weights.shape == states.shape:
+            return sums.squeeze(0)
+        return sums.reshape(*weights.shape[:-1], scores.shape[-1])
+
     @torch.no_grad()
     def estimate_population_flow(self, control, mu0: torch.Tensor, n_particles: int, horizon: Optional[int] = None,) -> torch.Tensor:
         steps = self.config.T if horizon is None else horizon
@@ -69,8 +110,8 @@ class SimplexPerturbedMFREINFORCE:
         param_dim = self.parameter_vector(control).numel()
         score_chunk_size = self._score_chunk_size(param_dim, n_aux)
         x_aux = torch.zeros(n_aux, horizon + 1, dtype=torch.long, device=self.config.device)
+        actions_aux = torch.zeros(n_aux, horizon, dtype=torch.long, device=self.config.device)
         q_aux = torch.zeros(n_aux, horizon, self.n_states, dtype=self.config.dtype, device=self.config.device)
-        psi = torch.zeros(n_aux, horizon, param_dim, dtype=self.config.dtype, device=self.config.device)
 
         x_aux[:, 0] = torch.multinomial(mu_flow[0], num_samples=n_aux, replacement=True)
         for t in range(horizon):
@@ -78,41 +119,57 @@ class SimplexPerturbedMFREINFORCE:
             M_t = (1.0 - eta) * mu_flow[t].unsqueeze(0) + eta * q_t
             states_t = x_aux[:, t]
             actions_t = self.env.sample_actions_batch(control, t, states_t, M_t)
+            actions_aux[:, t] = actions_t
             x_aux[:, t + 1] = self.env.sample_next_states_batch(states_t, actions_t, M_t)
             q_aux[:, t] = q_t
-            psi[:, t] = self.env.policy_scores_batch(
-                control,
-                t,
-                M_t.detach(),
-                states_t,
-                actions_t,
-                chunk_size=score_chunk_size,
-            ).reshape(n_aux, param_dim)
 
         D_hat = torch.zeros(horizon + 1, self.n_states - 1, param_dim, dtype=self.config.dtype, device=self.config.device)
+        state_groups = torch.arange(self.n_states - 1, device=self.config.device).unsqueeze(1)
+        correction_scale = (1.0 - eta) / eta
         for t in range(1, horizon + 1):
+            group_weights = (x_aux[:, t].unsqueeze(0) == state_groups).to(self.config.dtype)
+            score_prefix_sums = torch.zeros(
+                self.n_states - 1,
+                param_dim,
+                dtype=self.config.dtype,
+                device=self.config.device,
+            )
+            for s in range(t):
+                M_s = (1.0 - eta) * mu_flow[s].unsqueeze(0) + eta * q_aux[:, s]
+                score_prefix_sums = score_prefix_sums + self._weighted_policy_score_sums(
+                    control,
+                    s,
+                    M_s.detach(),
+                    x_aux[:, s],
+                    actions_aux[:, s],
+                    group_weights,
+                    chunk_size=score_chunk_size,
+                ).reshape(self.n_states - 1, param_dim)
+
             H_path = self.H(q_aux[:, :t])
-            correction = torch.einsum("rsl,slp->rp", H_path, D_hat[:t])
-            psi_prefix = psi[:, :t].sum(dim=1)
-            for k in range(self.n_states - 1):
-                selected = x_aux[:, t] == k
-                if selected.any():
-                    values = psi_prefix[selected] - ((1.0 - eta) / eta) * correction[selected]
-                    D_hat[t, k] = values.sum(dim=0) / n_aux
+            grouped_H = torch.einsum("kr,rsl->ksl", group_weights, H_path)
+            correction_sums = torch.einsum("ksl,slp->kp", grouped_H, D_hat[:t])
+            D_hat[t] = (score_prefix_sums - correction_scale * correction_sums) / n_aux
 
         return D_hat
 
     def gradient_estimate(self,
-        control, mu_flow: torch.Tensor, D_hat: torch.Tensor, eps_law: float, B: int, baseline: Union[None, float, Literal["batch_mean"]] = "batch_mean",
+        control,
+        mu_flow: torch.Tensor,
+        D_hat: torch.Tensor,
+        eps_law: float,
+        B: int,
+        baseline: Union[None, float, Literal["batch_mean"]] = "batch_mean",
+        keep_score_diagnostics: Optional[bool] = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         horizon = mu_flow.shape[0] - 1
         param_dim = self.parameter_vector(control).numel()
         score_chunk_size = self._score_chunk_size(param_dim, B)
+        keep_scores = self._keep_score_diagnostics(keep_score_diagnostics)
         q_path = self.sample_q_batch(B * (horizon + 1)).reshape(B, horizon + 1, self.n_states)
         states = torch.zeros(B, horizon + 1, dtype=torch.long, device=self.config.device)
         actions = torch.zeros(B, horizon, dtype=torch.long, device=self.config.device)
         returns = torch.zeros(B, dtype=self.config.dtype, device=self.config.device)
-        score_pol = torch.zeros(B, param_dim, dtype=self.config.dtype, device=self.config.device)
 
         states[:, 0] = torch.multinomial(mu_flow[0], num_samples=B, replacement=True)
         for t in range(horizon):
@@ -121,22 +178,10 @@ class SimplexPerturbedMFREINFORCE:
             actions_t = self.env.sample_actions_batch(control, t, states_t, M_t)
             actions[:, t] = actions_t
             returns = returns + self.discount(t) * self.env.reward_batch(states_t, M_t, actions_t)
-            score_pol = score_pol + self.env.policy_scores_batch(
-                control,
-                t,
-                M_t.detach(),
-                states_t,
-                actions_t,
-                chunk_size=score_chunk_size,
-            ).reshape(B, param_dim)
             states[:, t + 1] = self.env.sample_next_states_batch(states_t, actions_t, M_t)
 
         M_T = (1.0 - eps_law) * mu_flow[horizon].unsqueeze(0) + eps_law * q_path[:, horizon]
         returns = returns + self.discount(horizon) * self.env.terminal_reward_batch(states[:, horizon], M_T)
-
-        score_pert = torch.einsum("btk,tkp->bp", self.H(q_path), D_hat)
-        score_pert = -((1.0 - eps_law) / eps_law) * score_pert
-        scores = score_pol + score_pert
 
         if baseline == "batch_mean":
             b0 = returns.mean()
@@ -145,16 +190,49 @@ class SimplexPerturbedMFREINFORCE:
         else:
             b0 = torch.tensor(float(baseline), dtype=self.config.dtype, device=self.config.device)
 
-        grad_flat = ((returns - b0).unsqueeze(1) * scores).mean(dim=0)
+        centered_returns = returns - b0
+        policy_score_sum = torch.zeros(param_dim, dtype=self.config.dtype, device=self.config.device)
+        score_pol = None
+        if keep_scores:
+            score_pol = torch.zeros(B, param_dim, dtype=self.config.dtype, device=self.config.device)
+
+        for t in range(horizon):
+            M_t = (1.0 - eps_law) * mu_flow[t].unsqueeze(0) + eps_law * q_path[:, t]
+            policy_score_sum = policy_score_sum + self._weighted_policy_score_sums(
+                control,
+                t,
+                M_t.detach(),
+                states[:, t],
+                actions[:, t],
+                centered_returns,
+                chunk_size=score_chunk_size,
+            ).reshape(param_dim)
+            if keep_scores:
+                score_pol = score_pol + self.env.policy_scores_batch(
+                    control,
+                    t,
+                    M_t.detach(),
+                    states[:, t],
+                    actions[:, t],
+                    chunk_size=score_chunk_size,
+                ).reshape(B, param_dim)
+
+        H_path = self.H(q_path)
+        weighted_H = torch.einsum("b,btk->tk", centered_returns, H_path)
+        perturbation_score_sum = -((1.0 - eps_law) / eps_law) * torch.einsum("tk,tkp->p", weighted_H, D_hat)
+        grad_flat = (policy_score_sum + perturbation_score_sum) / B
         grad_hat = self.format_gradient(control, grad_flat)
-        return grad_hat, {
+        diag = {
             "returns": returns,
-            "scores": scores,
             "baseline": b0,
             "mean_return": returns.mean(),
             "std_return": returns.std(unbiased=False),
             "grad_norm": torch.linalg.norm(grad_flat),
         }
+        if keep_scores:
+            score_pert = -((1.0 - eps_law) / eps_law) * torch.einsum("btk,tkp->bp", H_path, D_hat)
+            diag["scores"] = score_pol + score_pert
+        return grad_hat, diag
 
     def complete_gradient_estimate(
         self,
@@ -165,10 +243,19 @@ class SimplexPerturbedMFREINFORCE:
         n_aux: int,
         eta: Optional[float] = None,
         baseline: Union[None, float, Literal["batch_mean"]] = "batch_mean",
+        keep_score_diagnostics: Optional[bool] = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         eta_value = eps_law if eta is None else float(eta)
         D_hat = self.estimate_sensitivity(control, mu_flow, eta_value, n_aux)
-        grad_hat, diag = self.gradient_estimate(control, mu_flow, D_hat, eps_law, B, baseline=baseline)
+        grad_hat, diag = self.gradient_estimate(
+            control,
+            mu_flow,
+            D_hat,
+            eps_law,
+            B,
+            baseline=baseline,
+            keep_score_diagnostics=keep_score_diagnostics,
+        )
         diag = dict(diag)
         diag["sensitivity"] = D_hat
         diag["eta"] = torch.tensor(eta_value, dtype=self.config.dtype, device=self.config.device)

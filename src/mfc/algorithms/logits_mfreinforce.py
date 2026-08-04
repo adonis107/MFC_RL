@@ -63,6 +63,47 @@ class LogitsPerturbedMFREINFORCE:
             return min(N, 8)
         return min(N, 32)
 
+    def _keep_score_diagnostics(self, keep_score_diagnostics: Optional[bool]) -> bool:
+        if keep_score_diagnostics is None:
+            return bool(getattr(self.config, "keep_score_diagnostics", False))
+        return bool(keep_score_diagnostics)
+
+    def _weighted_policy_score_sums(
+        self,
+        control,
+        t: int,
+        mu: torch.Tensor,
+        states: torch.Tensor,
+        actions: torch.Tensor,
+        weights: torch.Tensor,
+        chunk_size: int | None = None,
+    ) -> torch.Tensor:
+        if hasattr(self.env, "weighted_policy_score_sums"):
+            return self.env.weighted_policy_score_sums(
+                control,
+                t,
+                mu,
+                states,
+                actions,
+                weights,
+                chunk_size=chunk_size,
+            )
+
+        states_flat = states.reshape(-1)
+        scores = self.env.policy_scores_batch(
+            control,
+            t,
+            mu,
+            states,
+            actions,
+            chunk_size=chunk_size,
+        ).reshape(states_flat.numel(), -1)
+        weights_2d = weights.to(dtype=self.config.dtype, device=self.config.device).reshape(-1, states_flat.numel())
+        sums = weights_2d @ scores
+        if weights.shape == states.shape:
+            return sums.squeeze(0)
+        return sums.reshape(*weights.shape[:-1], scores.shape[-1])
+
     @torch.no_grad()
     def _estimate_population_flow_batch(
         self,
@@ -228,6 +269,7 @@ class LogitsPerturbedMFREINFORCE:
             device=self.config.device,
         )
         outer_indices = torch.arange(batch_size, device=self.config.device).repeat_interleave(n)
+        group_count = batch_size * self.n_states
 
         for t in range(1, horizon + 1):
             repeated_logit_flow = logit_flow[:, : t + 1].repeat_interleave(n, dim=0)
@@ -240,23 +282,25 @@ class LogitsPerturbedMFREINFORCE:
                 lambdas,
             )
 
-            score_sum = torch.zeros(batch_size * n, param_dim, dtype=self.config.dtype, device=self.config.device)
+            target = outer_indices * self.n_states + y[:, t]
+            group_weights = torch.nn.functional.one_hot(target, num_classes=group_count).T.to(self.config.dtype)
+            grad_mu = torch.zeros(group_count, param_dim, dtype=self.config.dtype, device=self.config.device)
             for s in range(t):
                 m_s = self.perturb_law(repeated_logit_flow[:, s], epsilon, lambdas[:, s])
-                repeated_logit_grads = logit_grads[:, s].repeat_interleave(n, dim=0)
-                score_sum = score_sum + torch.einsum("bs,bsp->bp", lambdas[:, s], repeated_logit_grads) / epsilon
-                score_sum = score_sum + self.env.policy_scores_batch(
+                lambda_sums = torch.zeros(group_count, self.n_states, dtype=self.config.dtype, device=self.config.device)
+                lambda_sums.index_add_(0, target, lambdas[:, s])
+                lambda_sums = lambda_sums.reshape(batch_size, self.n_states, self.n_states)
+                grad_mu = grad_mu + torch.einsum("bkl,blp->bkp", lambda_sums, logit_grads[:, s]).reshape(group_count, param_dim) / epsilon
+                grad_mu = grad_mu + self._weighted_policy_score_sums(
                     control,
                     s,
                     m_s.detach(),
                     y[:, s],
                     actions_y[:, s],
                     chunk_size=score_chunk_size,
-                ).reshape(batch_size * n, param_dim)
+                    weights=group_weights,
+                ).reshape(group_count, param_dim)
 
-            grad_mu = torch.zeros(batch_size * self.n_states, param_dim, dtype=self.config.dtype, device=self.config.device)
-            target = outer_indices * self.n_states + y[:, t]
-            grad_mu.index_add_(0, target, score_sum)
             grad_mu = grad_mu.reshape(batch_size, self.n_states, param_dim)
             logit_grads[:, t] = grad_mu / n / mu_flow[:, t].unsqueeze(-1)
 
@@ -287,7 +331,7 @@ class LogitsPerturbedMFREINFORCE:
             mu_flow=mu_flow,
         )[0]
 
-    def _gradient_samples_batch(
+    def _gradient_sum_batch(
         self,
         control,
         mu0: torch.Tensor,
@@ -297,6 +341,7 @@ class LogitsPerturbedMFREINFORCE:
         horizon: int,
         batch_size: int,
         mu_flow: Optional[torch.Tensor] = None,
+        keep_score_diagnostics: bool = False,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         main_mu_flow = self._population_flow_batch(control, mu0, flow_particles, horizon, batch_size, mu_flow)
         logit_flow = self.logit(main_mu_flow)
@@ -322,29 +367,75 @@ class LogitsPerturbedMFREINFORCE:
 
         param_dim = self.parameter_vector(control).numel()
         score_chunk_size = self._score_chunk_size(param_dim, batch_size)
-        samples = torch.zeros(batch_size, param_dim, dtype=self.config.dtype, device=self.config.device)
+        gradient_sum = torch.zeros(param_dim, dtype=self.config.dtype, device=self.config.device)
+        samples = (
+            torch.zeros(batch_size, param_dim, dtype=self.config.dtype, device=self.config.device)
+            if keep_score_diagnostics
+            else None
+        )
 
         for t in range(horizon + 1):
             score = torch.einsum("bs,bsp->bp", lambdas[:, t], logit_grads[:, t]) / epsilon
+            weighted_score = score * returns[:, t].unsqueeze(1)
+            gradient_sum = gradient_sum + weighted_score.sum(dim=0)
+            if samples is not None:
+                samples = samples + weighted_score
             if t < horizon:
                 m_t = self.perturb_law(logit_flow[:, t], epsilon, lambdas[:, t])
-                score = score + self.env.policy_scores_batch(
+                gradient_sum = gradient_sum + self._weighted_policy_score_sums(
                     control,
                     t,
                     m_t.detach(),
                     y[:, t],
                     actions_y[:, t],
+                    returns[:, t],
                     chunk_size=score_chunk_size,
-                ).reshape(batch_size, param_dim)
-            samples = samples + score * returns[:, t].unsqueeze(1)
+                ).reshape(param_dim)
+                if samples is not None:
+                    policy_scores = self.env.policy_scores_batch(
+                        control,
+                        t,
+                        m_t.detach(),
+                        y[:, t],
+                        actions_y[:, t],
+                        chunk_size=score_chunk_size,
+                    ).reshape(batch_size, param_dim)
+                    samples = samples + policy_scores * returns[:, t].unsqueeze(1)
 
-        return samples, {
+        diag = {
             "returns": returns,
             "logit_gradients": logit_grads,
             "lambdas": lambdas,
             "y": y,
             "actions_y": actions_y,
         }
+        if samples is not None:
+            diag["samples"] = samples
+        return gradient_sum, diag
+
+    def _gradient_samples_batch(
+        self,
+        control,
+        mu0: torch.Tensor,
+        epsilon: float,
+        n: int,
+        flow_particles: int,
+        horizon: int,
+        batch_size: int,
+        mu_flow: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        _, diag = self._gradient_sum_batch(
+            control,
+            mu0,
+            epsilon,
+            n,
+            flow_particles,
+            horizon,
+            batch_size,
+            mu_flow=mu_flow,
+            keep_score_diagnostics=True,
+        )
+        return diag["samples"], diag
 
     def gradient_sample(
         self,
@@ -385,14 +476,21 @@ class LogitsPerturbedMFREINFORCE:
         flow_particles: int,
         horizon: Optional[int] = None,
         mu_flow: Optional[torch.Tensor] = None,
+        keep_score_diagnostics: Optional[bool] = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         if N <= 0:
             raise ValueError("N must be positive.")
 
         param_dim = self.parameter_vector(control).numel()
         sample_chunk_size = self._sample_chunk_size(control, param_dim, N)
-        samples = torch.zeros(N, param_dim, dtype=self.config.dtype, device=self.config.device)
+        keep_samples = self._keep_score_diagnostics(keep_score_diagnostics)
+        samples = (
+            torch.zeros(N, param_dim, dtype=self.config.dtype, device=self.config.device)
+            if keep_samples
+            else None
+        )
         returns = torch.zeros(N, dtype=self.config.dtype, device=self.config.device)
+        gradient_sum = torch.zeros(param_dim, dtype=self.config.dtype, device=self.config.device)
 
         steps = self.config.T if horizon is None else horizon
         if mu_flow is not None and mu_flow.ndim == 3 and mu_flow.shape[0] != N:
@@ -403,7 +501,7 @@ class LogitsPerturbedMFREINFORCE:
             chunk_mu_flow = None
             if mu_flow is not None:
                 chunk_mu_flow = mu_flow[start:end] if mu_flow.ndim == 3 else mu_flow
-            sample_chunk, diag_chunk = self._gradient_samples_batch(
+            gradient_chunk, diag_chunk = self._gradient_sum_batch(
                 control,
                 mu0,
                 epsilon,
@@ -412,15 +510,20 @@ class LogitsPerturbedMFREINFORCE:
                 steps,
                 batch_size=end - start,
                 mu_flow=chunk_mu_flow,
+                keep_score_diagnostics=keep_samples,
             )
-            samples[start:end] = sample_chunk
+            gradient_sum = gradient_sum + gradient_chunk
+            if samples is not None:
+                samples[start:end] = diag_chunk["samples"]
             returns[start:end] = diag_chunk["returns"][:, 0]
 
-        grad_flat = samples.mean(dim=0)
-        return self.format_gradient(control, grad_flat), {
-            "samples": samples,
+        grad_flat = gradient_sum / N
+        diag = {
             "returns": returns,
             "mean_return": returns.mean(),
             "std_return": returns.std(unbiased=False),
             "grad_norm": torch.linalg.norm(grad_flat),
         }
+        if samples is not None:
+            diag["samples"] = samples
+        return self.format_gradient(control, grad_flat), diag
