@@ -117,6 +117,82 @@ def test_distribution_batch_helpers_match_scalar_calls_and_deterministic_next_st
     assert torch.allclose(scores, scalar_scores)
 
 
+def _assert_weighted_score_reducer_matches_scores(env, control, t, mu, states, actions, chunk_size=None):
+    scores = env.policy_scores_batch(control, t, mu, states, actions, chunk_size=chunk_size).reshape(states.numel(), -1)
+    weights = torch.linspace(-0.3, 0.7, states.numel(), dtype=DTYPE, device=states.device)
+    expected = weights @ scores
+    actual = env.weighted_policy_score_sums(control, t, mu, states, actions, weights, chunk_size=chunk_size)
+    assert torch.allclose(actual, expected, atol=1e-10, rtol=1e-10)
+
+    grouped_weights = torch.stack([weights, weights.square() - 0.2])
+    grouped_expected = grouped_weights @ scores
+    grouped_actual = env.weighted_policy_score_sums(
+        control,
+        t,
+        mu,
+        states,
+        actions,
+        grouped_weights,
+        chunk_size=chunk_size,
+    )
+    assert torch.allclose(grouped_actual, grouped_expected, atol=1e-10, rtol=1e-10)
+
+
+def test_weighted_policy_score_reducers_match_materialized_scores():
+    two_config = TwoStateConfig(device=DEVICE, dtype=DTYPE)
+    two_env = TwoStateMFC(two_config)
+    theta = torch.tensor([0.2, -0.4], dtype=DTYPE)
+    two_states = torch.tensor([0, 1, 0, 1])
+    two_actions = torch.tensor([1, 0, 0, 1])
+    two_mu = torch.tensor([0.35, 0.65], dtype=DTYPE)
+    _assert_weighted_score_reducer_matches_scores(two_env, theta, 0, two_mu, two_states, two_actions)
+
+    cyber_config = CybersecurityConfig(device=DEVICE, dtype=DTYPE, hidden_units=8)
+    cyber_env = CybersecurityMFC(cyber_config)
+    cyber_policy = CybersecurityPolicy(cyber_config)
+    cyber_mu = torch.stack(
+        [
+            torch.full((cyber_config.n_states,), 1.0 / cyber_config.n_states, dtype=DTYPE),
+            torch.tensor([0.1, 0.2, 0.3, 0.4], dtype=DTYPE),
+            torch.tensor([0.4, 0.3, 0.2, 0.1], dtype=DTYPE),
+        ]
+    )
+    cyber_states = torch.tensor([0, 2, 3])
+    cyber_actions = torch.tensor([1, 0, 1])
+    _assert_weighted_score_reducer_matches_scores(
+        cyber_env,
+        cyber_policy,
+        1,
+        cyber_mu,
+        cyber_states,
+        cyber_actions,
+        chunk_size=2,
+    )
+
+    distribution_config = DistributionPlanningConfig(device=DEVICE, dtype=DTYPE, hidden_units=8)
+    distribution_env = DistributionPlanningMFC(distribution_config)
+    distribution_policy = DistributionPlanningPolicy(distribution_config)
+    distribution_mu = torch.stack(
+        [
+            torch.full((distribution_config.n_states,), 1.0 / distribution_config.n_states, dtype=DTYPE),
+            torch.linspace(1.0, 2.0, distribution_config.n_states, dtype=DTYPE),
+            torch.linspace(2.0, 1.0, distribution_config.n_states, dtype=DTYPE),
+        ]
+    )
+    distribution_mu = distribution_mu / distribution_mu.sum(dim=-1, keepdim=True)
+    distribution_states = torch.tensor([0, 5, 9])
+    distribution_actions = torch.tensor([0, 1, 2])
+    _assert_weighted_score_reducer_matches_scores(
+        distribution_env,
+        distribution_policy,
+        2,
+        distribution_mu,
+        distribution_states,
+        distribution_actions,
+        chunk_size=2,
+    )
+
+
 def test_exact_distribution_value_matches_manual_loop():
     config = DistributionPlanningConfig(device=DEVICE, dtype=DTYPE, hidden_units=8, T=3)
     env = DistributionPlanningMFC(config)
@@ -137,6 +213,212 @@ def test_exact_distribution_value_matches_manual_loop():
     manual_value = manual_value + env.terminal_reward(0, manual_mu)
 
     assert torch.allclose(value, manual_value, atol=1e-10, rtol=1e-10)
+
+
+def _reference_simplex_sensitivity(algorithm, control, mu_flow: torch.Tensor, eta: float, n_aux: int) -> torch.Tensor:
+    horizon = mu_flow.shape[0] - 1
+    param_dim = algorithm.parameter_vector(control).numel()
+    env = algorithm.env
+    score_chunk_size = algorithm._score_chunk_size(param_dim, n_aux)
+    x_aux = torch.zeros(n_aux, horizon + 1, dtype=torch.long, device=algorithm.config.device)
+    q_aux = torch.zeros(n_aux, horizon, algorithm.n_states, dtype=algorithm.config.dtype, device=algorithm.config.device)
+    psi = torch.zeros(n_aux, horizon, param_dim, dtype=algorithm.config.dtype, device=algorithm.config.device)
+
+    x_aux[:, 0] = torch.multinomial(mu_flow[0], num_samples=n_aux, replacement=True)
+    for t in range(horizon):
+        q_t = algorithm.sample_q_batch(n_aux)
+        M_t = (1.0 - eta) * mu_flow[t].unsqueeze(0) + eta * q_t
+        states_t = x_aux[:, t]
+        actions_t = env.sample_actions_batch(control, t, states_t, M_t)
+        x_aux[:, t + 1] = env.sample_next_states_batch(states_t, actions_t, M_t)
+        q_aux[:, t] = q_t
+        psi[:, t] = env.policy_scores_batch(
+            control,
+            t,
+            M_t.detach(),
+            states_t,
+            actions_t,
+            chunk_size=score_chunk_size,
+        ).reshape(n_aux, param_dim)
+
+    D_hat = torch.zeros(
+        horizon + 1,
+        algorithm.n_states - 1,
+        param_dim,
+        dtype=algorithm.config.dtype,
+        device=algorithm.config.device,
+    )
+    for t in range(1, horizon + 1):
+        H_path = algorithm.H(q_aux[:, :t])
+        correction = torch.einsum("rsl,slp->rp", H_path, D_hat[:t])
+        psi_prefix = psi[:, :t].sum(dim=1)
+        for k in range(algorithm.n_states - 1):
+            selected = x_aux[:, t] == k
+            if selected.any():
+                values = psi_prefix[selected] - ((1.0 - eta) / eta) * correction[selected]
+                D_hat[t, k] = values.sum(dim=0) / n_aux
+    return D_hat
+
+
+def _reference_logit_gradients_batch(
+    algorithm,
+    control,
+    mu0: torch.Tensor,
+    epsilon: float,
+    n: int,
+    flow_particles: int,
+    horizon: int,
+    batch_size: int,
+    mu_flow: torch.Tensor,
+) -> torch.Tensor:
+    flow = algorithm._population_flow_batch(control, mu0, flow_particles, horizon, batch_size, mu_flow)
+    logit_flow = algorithm.logit(flow)
+    param_dim = algorithm.parameter_vector(control).numel()
+    score_chunk_size = algorithm._score_chunk_size(param_dim, batch_size * n)
+    logit_grads = torch.zeros(
+        batch_size,
+        horizon + 1,
+        algorithm.n_states,
+        param_dim,
+        dtype=algorithm.config.dtype,
+        device=algorithm.config.device,
+    )
+    outer_indices = torch.arange(batch_size, device=algorithm.config.device).repeat_interleave(n)
+
+    for t in range(1, horizon + 1):
+        repeated_logit_flow = logit_flow[:, : t + 1].repeat_interleave(n, dim=0)
+        lambdas = torch.randn(batch_size * n, t, algorithm.n_states, dtype=algorithm.config.dtype, device=algorithm.config.device)
+        _, y, _, actions_y, _ = algorithm._simulate_perturbed_paths_batch(
+            control,
+            mu0,
+            repeated_logit_flow,
+            epsilon,
+            lambdas,
+        )
+
+        score_sum = torch.zeros(batch_size * n, param_dim, dtype=algorithm.config.dtype, device=algorithm.config.device)
+        for s in range(t):
+            m_s = algorithm.perturb_law(repeated_logit_flow[:, s], epsilon, lambdas[:, s])
+            repeated_logit_grads = logit_grads[:, s].repeat_interleave(n, dim=0)
+            score_sum = score_sum + torch.einsum("bs,bsp->bp", lambdas[:, s], repeated_logit_grads) / epsilon
+            score_sum = score_sum + algorithm.env.policy_scores_batch(
+                control,
+                s,
+                m_s.detach(),
+                y[:, s],
+                actions_y[:, s],
+                chunk_size=score_chunk_size,
+            ).reshape(batch_size * n, param_dim)
+
+        grad_mu = torch.zeros(batch_size * algorithm.n_states, param_dim, dtype=algorithm.config.dtype, device=algorithm.config.device)
+        target = outer_indices * algorithm.n_states + y[:, t]
+        grad_mu.index_add_(0, target, score_sum)
+        grad_mu = grad_mu.reshape(batch_size, algorithm.n_states, param_dim)
+        logit_grads[:, t] = grad_mu / n / flow[:, t].unsqueeze(-1)
+    return logit_grads
+
+
+def test_optimized_simplex_sensitivity_matches_reference_formula():
+    config = DistributionPlanningConfig(device=DEVICE, dtype=DTYPE, hidden_units=8, T=2)
+    env = DistributionPlanningMFC(config)
+    policy = DistributionPlanningPolicy(config)
+    mu0 = torch.full((config.n_states,), 1.0 / config.n_states, dtype=DTYPE)
+    flow = env.exact_population_flow(policy, mu0, config.T)
+    algorithm = SimplexPerturbedMFREINFORCE(env)
+
+    torch.manual_seed(777)
+    expected = _reference_simplex_sensitivity(algorithm, policy, flow, eta=0.2, n_aux=3)
+    torch.manual_seed(777)
+    actual = algorithm.estimate_sensitivity(policy, flow, eta=0.2, n_aux=3)
+
+    assert torch.allclose(actual, expected, atol=1e-10, rtol=1e-10)
+
+
+def test_optimized_simplex_gradient_matches_materialized_score_formula():
+    config = DistributionPlanningConfig(device=DEVICE, dtype=DTYPE, hidden_units=8, T=2)
+    env = DistributionPlanningMFC(config)
+    policy = DistributionPlanningPolicy(config)
+    mu0 = torch.full((config.n_states,), 1.0 / config.n_states, dtype=DTYPE)
+    flow = env.exact_population_flow(policy, mu0, config.T)
+    algorithm = SimplexPerturbedMFREINFORCE(env)
+    D_hat = torch.linspace(
+        -0.05,
+        0.05,
+        (config.T + 1) * (config.n_states - 1) * algorithm.parameter_vector(policy).numel(),
+        dtype=DTYPE,
+    ).reshape(config.T + 1, config.n_states - 1, -1)
+
+    grad, diag = algorithm.gradient_estimate(
+        policy,
+        flow,
+        D_hat,
+        eps_law=0.2,
+        B=4,
+        baseline="batch_mean",
+        keep_score_diagnostics=True,
+    )
+    expected = ((diag["returns"] - diag["baseline"]).unsqueeze(1) * diag["scores"]).mean(dim=0)
+
+    assert torch.allclose(grad, expected, atol=1e-10, rtol=1e-10)
+
+
+def test_optimized_logit_gradients_match_reference_formula():
+    config = DistributionPlanningConfig(device=DEVICE, dtype=DTYPE, hidden_units=8, T=2)
+    env = DistributionPlanningMFC(config)
+    policy = DistributionPlanningPolicy(config)
+    mu0 = torch.full((config.n_states,), 1.0 / config.n_states, dtype=DTYPE)
+    flow = env.exact_population_flow(policy, mu0, config.T)
+    algorithm = LogitsPerturbedMFREINFORCE(env)
+
+    torch.manual_seed(888)
+    expected = _reference_logit_gradients_batch(
+        algorithm,
+        policy,
+        mu0,
+        epsilon=0.2,
+        n=2,
+        flow_particles=1,
+        horizon=config.T,
+        batch_size=2,
+        mu_flow=flow,
+    )
+    torch.manual_seed(888)
+    actual = algorithm._estimate_logit_gradients_batch(
+        policy,
+        mu0,
+        epsilon=0.2,
+        n=2,
+        flow_particles=1,
+        horizon=config.T,
+        batch_size=2,
+        mu_flow=flow,
+    )
+
+    assert torch.allclose(actual, expected, atol=1e-10, rtol=1e-10)
+
+
+def test_optimized_logits_gradient_matches_materialized_samples_when_requested():
+    config = CybersecurityConfig(device=DEVICE, dtype=DTYPE, hidden_units=8, T_train=2)
+    env = CybersecurityMFC(config)
+    policy = CybersecurityPolicy(config)
+    mu0 = torch.full((config.n_states,), 1.0 / config.n_states, dtype=DTYPE)
+    flow = env.exact_population_flow(policy, mu0, config.T_train)
+    algorithm = LogitsPerturbedMFREINFORCE(env)
+
+    grad, diag = algorithm.gradient_estimate(
+        policy,
+        mu0,
+        epsilon=0.2,
+        N=3,
+        n=1,
+        flow_particles=1,
+        horizon=config.T_train,
+        mu_flow=flow,
+        keep_score_diagnostics=True,
+    )
+
+    assert "samples" in diag
+    assert torch.allclose(grad, diag["samples"].mean(dim=0), atol=1e-10, rtol=1e-10)
 
 
 def test_algorithm_smoke_outputs_are_finite_for_notebook02_environments():
