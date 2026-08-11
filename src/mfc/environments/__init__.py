@@ -3,3 +3,5 @@ from .cybersecurity import CybersecurityConfig, CybersecurityPolicy, Cybersecuri
 from .distribution_planning import DistributionPlanningConfig, DistributionPlanningPolicy, DistributionPlanningMFC
 from .lq import LQConfig, LinearQuadraticMFC
 from .advertising import AdvertisingConfig, AdvertisingPolicy, AdvertisingMFC
+from .portfolio import PortfolioConfig, MeanVariancePortfolioMFC
+from .cucker_smale import CuckerSmaleConfig, CuckerSmalePolicy, CuckerSmaleMFC
