@@ -5,3 +5,4 @@ from .lq import LQConfig, LinearQuadraticMFC
 from .advertising import AdvertisingConfig, AdvertisingPolicy, AdvertisingMFC
 from .portfolio import PortfolioConfig, MeanVariancePortfolioMFC
 from .cucker_smale import CuckerSmaleConfig, CuckerSmalePolicy, CuckerSmaleMFC
+from .kuramoto import KuramotoConfig, KuramotoPolicy, KuramotoMFC
