@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Mapping
 from ..core.artifacts import _make_run_dir, _metadata, _write_csv, _write_json
 from ..core.controls import load_control
 from ..core.evaluation import evaluate_control
+from ..core.memory import release_memory
 from ..core.registry import ENVIRONMENTS, build_environment
 from ..core.session import RunResult, load_checkpoint, normalize_experiment_config
 from ..diagnostics.common import _float_list
@@ -86,6 +87,7 @@ def run_particle_transfer_study(config: Mapping[str, Any]) -> RunResult:
         checkpoints.append({"train_particles": n_train, "payload": payload, "run_dir": str(result.run_dir)})
         for row in result.history:
             history_rows.append({"train_particles": n_train, **row})
+        release_memory()
 
     rows: List[Dict[str, Any]] = []
     for item in checkpoints:
@@ -105,6 +107,7 @@ def run_particle_transfer_study(config: Mapping[str, Any]) -> RunResult:
             row = {"train_particles": item["train_particles"], "eval_particles": n_eval, "run_dir": item["run_dir"]}
             row.update({key: value for key, value in metrics.items() if isinstance(value, (int, float, str, bool))})
             rows.append(row)
+            release_memory()
 
     _write_csv(run_dir / "diagnostics.csv", rows)
     _write_csv(run_dir / "optimization_history.csv", history_rows)

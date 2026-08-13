@@ -12,6 +12,7 @@ if str(SRC) not in sys.path:
 
 from mfc.experiments import notebook_helpers as nh  # noqa: E402
 from mfc.experiments import presets  # noqa: E402
+from mfc.experiments.core.memory import release_memory  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -38,6 +39,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--force", action="store_true", help="Rebuild existing artifacts.")
     parser.add_argument("--core-only", action="store_true", help="Skip extended studies and generate only the core bundle.")
     parser.add_argument("--device", help="Override the helper default device, e.g. cuda or cpu.")
+    parser.add_argument(
+        "--memory-cleanup",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run Python GC and clear unused CUDA cache between benchmark bundles. Enabled by default.",
+    )
     args = parser.parse_args(argv)
 
     preset = "main" if args.full else args.preset
@@ -77,6 +84,8 @@ def main(argv: list[str] | None = None) -> int:
                     preset=preset,
                 )
             print(f"{env_name} seed={seed}: {bundle['base_dir']}")
+            if args.memory_cleanup:
+                release_memory()
     return 0
 
 

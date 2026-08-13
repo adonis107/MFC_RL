@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Mapping
 
 from ..application import run_application_diagnostics
 from ..core.artifacts import _make_run_dir, _metadata, _write_csv, _write_json
+from ..core.memory import release_memory
 from ..core.registry import ENVIRONMENTS, FINITE_ALGORITHMS, require_algorithm_name, require_env_name
 from ..core.session import RunResult, normalize_experiment_config
 from ..diagnostics.functional_law import run_functional_law_diagnostic
@@ -65,6 +66,8 @@ def run_core_suite(config: Mapping[str, Any]) -> RunResult:
             )
             if bool(config.get("study", {}).get("fail_fast", False)):
                 raise
+        finally:
+            release_memory()
     _write_csv(run_dir / "diagnostics.csv", rows)
     metrics = {"components": len(rows), "failures": sum(row["status"] != "ok" for row in rows)}
     _write_json(run_dir / "metrics.json", metrics)

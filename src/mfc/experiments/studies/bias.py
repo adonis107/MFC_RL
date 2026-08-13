@@ -8,6 +8,7 @@ import torch
 from ..core.artifacts import _make_run_dir, _metadata, _write_csv, _write_json
 from ..core.controls import initialize_control, load_control
 from ..core.evaluation import evaluate_control
+from ..core.memory import release_memory
 from ..core.registry import build_environment, require_env_name
 from ..core.session import RunResult, load_checkpoint, normalize_experiment_config
 from ..diagnostics.common import _float_list
@@ -46,6 +47,7 @@ def run_perturbation_bias_study(config: Mapping[str, Any]) -> RunResult:
         gradient_config.setdefault("train", {})["run_name"] = "gradient_bias_inner"
         result = run_gradient_diagnostic(gradient_config)
         rows = _read_csv(result.diagnostics_path) if result.diagnostics_path else []
+        release_memory()
 
     run_dir = _make_run_dir("perturbation-bias", config)
     _write_json(run_dir / "config.json", config)
@@ -84,6 +86,7 @@ def run_optimizer_bias_study(config: Mapping[str, Any]) -> RunResult:
         checkpoint_payloads.append({"lambda": lambda_value, "run": result, "payload": payload})
         for history_row in result.history:
             training_rows.append({"lambda": lambda_value, "run_dir": str(result.run_dir), **history_row})
+        release_memory()
 
     reference_index = int(study_config.get("reference_index", 0))
     reference = checkpoint_payloads[reference_index]
@@ -142,6 +145,7 @@ def run_optimizer_bias_study(config: Mapping[str, Any]) -> RunResult:
             row["optimal_value_bias_proxy"] = float(objective) - float(reference_objective)
         row.update({f"metric_{key}": value for key, value in metrics.items() if isinstance(value, (int, float, str, bool))})
         rows.append(row)
+        release_memory()
 
     _write_csv(run_dir / "optimization_history.csv", training_rows)
     _write_csv(run_dir / "diagnostics.csv", rows)

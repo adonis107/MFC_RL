@@ -8,6 +8,7 @@ from ..core.artifacts import _make_run_dir, _metadata, _write_csv, _write_json
 from ..core.controls import control_vector, initialize_control
 from ..core.evaluation import finite_population_flow
 from ..core.gradient_steps import finite_gradient, make_algorithm
+from ..core.memory import release_memory
 from ..core.registry import build_environment, require_algorithm_name, require_env_name, validate_compatibility
 from ..core.runtime import _aux_batch, _lambda_value, _main_batch, _training_horizon, sample_initial_laws
 from ..core.session import RunResult, normalize_experiment_config, set_seed
@@ -72,10 +73,13 @@ def run_score_validation(config: Mapping[str, Any]) -> RunResult:
                 if score is None:
                     raise ValueError("continuous-mfreinforce did not return score diagnostics.")
                 samples.append(score.detach().reshape(-1, control_vector(control).numel()))
+                del local_config, local_algorithm, diag, score
             score_samples = torch.cat(samples, dim=0)
             _append_score_rows(summary_rows, coordinate_rows, lambda_value, score_samples)
             sample_rows.extend(_score_sample_rows(lambda_value, score_samples))
             covariance_rows.extend(_matrix_rows(lambda_value, _safe_covariance(score_samples), "covariance"))
+            del samples, score_samples
+            release_memory()
 
         run_dir = _make_run_dir("score-validation", config)
         _write_json(run_dir / "config.json", config)
@@ -145,11 +149,18 @@ def run_score_validation(config: Mapping[str, Any]) -> RunResult:
             if score is None:
                 raise ValueError(f"{algorithm_name!r} did not return score diagnostics.")
             samples.append(score.detach().reshape(-1, control_vector(control).numel()))
+            if algorithm_name in {"simplex", "logits"}:
+                del diag
+            else:
+                del grad
+            del local_config, score
 
         score_samples = torch.cat(samples, dim=0)
         _append_score_rows(summary_rows, coordinate_rows, lambda_value, score_samples)
         sample_rows.extend(_score_sample_rows(lambda_value, score_samples))
         covariance_rows.extend(_matrix_rows(lambda_value, _safe_covariance(score_samples), "covariance"))
+        del samples, score_samples
+        release_memory()
 
     run_dir = _make_run_dir("score-validation", config)
     _write_json(run_dir / "config.json", config)

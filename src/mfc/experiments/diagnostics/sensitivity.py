@@ -9,6 +9,7 @@ from mfc.algorithms import ContinuousTransportMFREINFORCE, SimplexPerturbedMFREI
 from ..core.controls import control_vector, initialize_control
 from .common import _as_list, _float_list, _save_diagnostic_result
 from ..core.evaluation import finite_population_flow
+from ..core.memory import release_memory
 from ..core.registry import EnvironmentSpec, build_environment, require_algorithm_name, require_env_name, validate_compatibility
 from ..core.runtime import _aux_batch, _lambda_value, _training_horizon, sample_initial_laws
 from ..core.session import RunResult, normalize_experiment_config, set_seed
@@ -57,6 +58,7 @@ def run_sensitivity_diagnostic(config: Mapping[str, Any]) -> RunResult:
                 )
                 if estimates is None:
                     rows.append(unavailable_sensitivity_row(method, eta))
+                    release_memory()
                     continue
                 stacked = torch.stack(estimates)
                 summary_rows = sensitivity_summary_rows(eta, stacked, oracle, method=method)
@@ -64,6 +66,8 @@ def run_sensitivity_diagnostic(config: Mapping[str, Any]) -> RunResult:
                     row.update(oracle_metadata)
                 rows.extend(summary_rows)
                 sample_rows.extend(sensitivity_sample_rows(method, eta, stacked, oracle))
+                del estimates, stacked, summary_rows
+                release_memory()
         return _save_diagnostic_result(
             "diagnose-sensitivity",
             config,
@@ -118,6 +122,7 @@ def run_sensitivity_diagnostic(config: Mapping[str, Any]) -> RunResult:
             )
             if estimates is None:
                 rows.append(unavailable_sensitivity_row(method, eta))
+                release_memory()
                 continue
             stacked = torch.stack(estimates)
             summary_rows = sensitivity_summary_rows(eta, stacked, oracle, method=method)
@@ -125,6 +130,8 @@ def run_sensitivity_diagnostic(config: Mapping[str, Any]) -> RunResult:
                 row.update(oracle_metadata)
             rows.extend(summary_rows)
             sample_rows.extend(sensitivity_sample_rows(method, eta, stacked, oracle))
+            del estimates, stacked, summary_rows
+            release_memory()
     return _save_diagnostic_result(
         "diagnose-sensitivity",
         config,

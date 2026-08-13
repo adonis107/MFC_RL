@@ -9,6 +9,7 @@ import torch
 from ..core.artifacts import _make_run_dir, _metadata, _set_dotted, _write_csv, _write_json
 from ..core.controls import load_control
 from ..core.evaluation import evaluate_control
+from ..core.memory import release_memory
 from ..core.registry import ENVIRONMENTS, build_environment
 from ..core.session import RunResult, normalize_experiment_config
 from .common import (
@@ -63,6 +64,7 @@ def run_robustness_study(config: Mapping[str, Any]) -> RunResult:
         row = {"variant": label, **{key: value for key, value in variant.items() if isinstance(value, (int, float, str, bool))}}
         row.update({key: value for key, value in metrics.items() if isinstance(value, (int, float, str, bool))})
         rows.append(row)
+        release_memory()
     _write_csv(run_dir / "diagnostics.csv", rows)
     metrics = {"variants": len(rows)}
     _write_json(run_dir / "metrics.json", metrics)

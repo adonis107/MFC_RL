@@ -16,6 +16,7 @@ from .common import (
     _signature,
 )
 from ..core.gradient_steps import make_algorithm
+from ..core.memory import release_memory
 from ..core.registry import FINITE_ALGORITHMS, build_environment, require_algorithm_name
 from ..core.session import RunResult, normalize_experiment_config, set_seed
 
@@ -63,6 +64,8 @@ def run_functional_law_diagnostic(config: Mapping[str, Any]) -> RunResult:
         for idx, value in enumerate(stacked.mean(dim=0).detach().cpu().tolist()):
             row[f"signature_mean_{idx}"] = value
         rows.append(row)
+        del signatures, stacked, standardized, covariance
+        release_memory()
     return _save_diagnostic_result(
         "diagnose-functional-law",
         config,

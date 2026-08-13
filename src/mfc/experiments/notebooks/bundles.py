@@ -6,6 +6,7 @@ from typing import Any, Dict, Mapping
 
 from .. import presets as experiment_presets
 from ..application import run_application_diagnostics
+from ..core.memory import release_memory
 from ..diagnostics.functional_law import run_functional_law_diagnostic
 from ..diagnostics.gradient import run_gradient_diagnostic
 from ..diagnostics.perturbation import run_perturbation_diagnostic
@@ -50,6 +51,7 @@ def ensure_discrete_benchmark_bundle(
             primary_config = config
         if force or not (train_dir / "checkpoint.pt").exists():
             run_train(config)
+            release_memory()
         bundle["train"][algorithm] = train_dir
 
         app_dir = base_dir / "application" / f"{env_name}_{algorithm}"
@@ -62,17 +64,23 @@ def ensure_discrete_benchmark_bundle(
         }
         if force or not (app_dir / "metrics.json").exists():
             run_application_diagnostics(app_config)
+            release_memory()
         bundle["application"][algorithm] = app_dir
 
         bundle["diagnostics"][algorithm] = _ensure_algorithm_diagnostics(env_name, algorithm, base_dir, config, force)
+        release_memory()
 
     bundle["studies"]["budget"] = _ensure_budget_study(env_name, base_dir, force=force, quick=quick, seed=seed, preset=preset_name)
+    release_memory()
     bundle["studies"]["horizon"] = _ensure_horizon_study(env_name, base_dir, force=force, quick=quick, seed=seed, preset=preset_name)
+    release_memory()
     bundle["studies"]["optimization"] = _ensure_optimization_summary(env_name, base_dir, bundle, force=force)
+    release_memory()
     if extended:
         if primary_config is None:
             raise ValueError("Discrete extended studies require a simplex base config.")
         bundle["studies"].update(_ensure_extended_studies(env_name, base_dir, primary_config, bundle, force=force, quick=quick, preset=preset_name))
+        release_memory()
     (base_dir / "bundle.json").write_text(json.dumps(_jsonable_bundle(bundle), indent=2) + "\n")
     return bundle
 
@@ -98,6 +106,7 @@ def ensure_continuous_benchmark_bundle(
     config = continuous_benchmark_config(env_name, base_dir / "train", f"{env_name}_{algorithm}", seed=seed, quick=quick, preset=preset_name)
     if force or not (train_dir / "checkpoint.pt").exists():
         run_train(config)
+        release_memory()
     bundle["train"][algorithm] = train_dir
 
     app_dir = base_dir / "application" / f"{env_name}_{algorithm}"
@@ -110,14 +119,20 @@ def ensure_continuous_benchmark_bundle(
     }
     if force or not (app_dir / "metrics.json").exists():
         run_application_diagnostics(app_config)
+        release_memory()
     bundle["application"][algorithm] = app_dir
 
     bundle["diagnostics"][algorithm] = _ensure_continuous_diagnostics(env_name, base_dir, config, force)
+    release_memory()
     bundle["studies"]["budget"] = _ensure_continuous_budget_study(env_name, base_dir, force=force, quick=quick, seed=seed, preset=preset_name)
+    release_memory()
     bundle["studies"]["horizon"] = _ensure_continuous_horizon_study(env_name, base_dir, force=force, quick=quick, seed=seed, preset=preset_name)
+    release_memory()
     bundle["studies"]["optimization"] = _ensure_continuous_optimization_summary(env_name, base_dir, bundle, force=force)
+    release_memory()
     if extended:
         bundle["studies"].update(_ensure_extended_studies(env_name, base_dir, config, bundle, force=force, quick=quick, preset=preset_name))
+        release_memory()
     (base_dir / "bundle.json").write_text(json.dumps(_jsonable_bundle(bundle), indent=2) + "\n")
     return bundle
 
@@ -199,6 +214,7 @@ def _ensure_algorithm_diagnostics(
         diag_config = _with_output(config, base_dir / "diagnostics", run_name)
         if force or not (run_dir / "diagnostics.csv").exists():
             runner(diag_config)
+            release_memory()
         out[name] = run_dir
     return out
 
@@ -224,6 +240,7 @@ def _ensure_continuous_diagnostics(
         diag_config = _with_output(config, base_dir / "diagnostics", run_name)
         if force or not (run_dir / "diagnostics.csv").exists():
             runner(diag_config)
+            release_memory()
         out[name] = run_dir
     return out
 
@@ -239,6 +256,7 @@ def _ensure_budget_study(env_name: str, base_dir: Path, *, force: bool, quick: b
     }
     if force or not (run_dir / "diagnostics.csv").exists():
         run_budget_allocation(config)
+        release_memory()
     return run_dir
 
 
@@ -253,6 +271,7 @@ def _ensure_continuous_budget_study(env_name: str, base_dir: Path, *, force: boo
     }
     if force or not (run_dir / "diagnostics.csv").exists():
         run_budget_allocation(config)
+        release_memory()
     return run_dir
 
 
@@ -266,6 +285,7 @@ def _ensure_horizon_study(env_name: str, base_dir: Path, *, force: bool, quick: 
     config = benchmark_config(env_name, "simplex", base_dir / "studies", "horizon_scaling", seed=seed, quick=quick, preset=preset)
     if force or not (run_dir / "diagnostics.csv").exists():
         run_variant_grid(config, "horizon-scaling", variants, default_command="diagnose-gradient")
+        release_memory()
         generated = base_dir / "studies" / "horizon_scaling"
         if generated != run_dir and generated.exists():
             pass
@@ -281,6 +301,7 @@ def _ensure_continuous_horizon_study(env_name: str, base_dir: Path, *, force: bo
     config = continuous_benchmark_config(env_name, base_dir / "studies", "horizon_scaling", seed=seed, quick=quick, preset=preset)
     if force or not (run_dir / "diagnostics.csv").exists():
         run_variant_grid(config, "horizon-scaling", variants, default_command="diagnose-gradient")
+        release_memory()
     return run_dir
 
 
@@ -298,6 +319,7 @@ def _ensure_optimization_summary(env_name: str, base_dir: Path, bundle: Mapping[
     }
     if force or not (run_dir / "diagnostics.csv").exists():
         run_optimization_summary(config)
+        release_memory()
     return run_dir
 
 
@@ -315,6 +337,7 @@ def _ensure_continuous_optimization_summary(env_name: str, base_dir: Path, bundl
     }
     if force or not (run_dir / "diagnostics.csv").exists():
         run_optimization_summary(config)
+        release_memory()
     return run_dir
 
 
@@ -371,6 +394,7 @@ def _ensure_extended_studies(
         run_dir = paths[name]
         if force or not (run_dir / "diagnostics.csv").exists():
             run_study(study_config)
+            release_memory()
         out[name] = run_dir
     return out
 

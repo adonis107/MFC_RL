@@ -13,6 +13,7 @@ from .common import (
     _save_diagnostic_result,
 )
 from ..core.gradient_steps import make_algorithm
+from ..core.memory import release_memory
 from ..core.registry import FINITE_ALGORITHMS, build_environment, require_algorithm_name
 from ..core.session import RunResult, normalize_experiment_config, set_seed
 
@@ -90,6 +91,8 @@ def run_perturbation_diagnostic(config: Mapping[str, Any]) -> RunResult:
             values = torch.as_tensor([float(metric[key]) for metric in metric_rows], dtype=torch.float64)
             row[f"{key}_mean"] = float(values.mean().item())
         rows.append(row)
+        del distances, metric_rows, tensor
+        release_memory()
     return _save_diagnostic_result(
         "diagnose-perturbation",
         config,

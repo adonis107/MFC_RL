@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Mapping, Sequence
 
 from ..application import run_application_diagnostics
 from ..core.artifacts import _make_run_dir, _metadata, _set_dotted, _write_csv, _write_json
+from ..core.memory import release_memory
 from ..core.registry import ENVIRONMENTS
 from ..core.session import RunResult, normalize_experiment_config
 from ..diagnostics.functional_law import run_functional_law_diagnostic
@@ -61,6 +62,7 @@ def run_parameter_grid_study(config: Mapping[str, Any], command_name: str = "gri
         if result.diagnostics_path and Path(result.diagnostics_path).exists():
             for row in _read_csv(result.diagnostics_path):
                 diagnostic_rows.append({"index": index, **parameter_payload, **row})
+        release_memory()
 
     _write_csv(run_dir / "grid_metrics.csv", metrics_rows)
     _write_csv(run_dir / "diagnostics.csv", diagnostic_rows if diagnostic_rows else metrics_rows)
@@ -120,6 +122,7 @@ def run_horizon_scaling_study(config: Mapping[str, Any]) -> RunResult:
             if result.diagnostics_path and Path(result.diagnostics_path).exists():
                 for row in _read_csv(result.diagnostics_path):
                     diagnostic_rows.append({"component": component, "horizon": horizon, **row})
+            release_memory()
 
     _write_csv(run_dir / "grid_metrics.csv", metrics_rows)
     _write_csv(run_dir / "diagnostics.csv", diagnostic_rows)
@@ -240,6 +243,7 @@ def run_variant_grid(
         if result.diagnostics_path and Path(result.diagnostics_path).exists():
             for diagnostic_row in _read_csv(result.diagnostics_path):
                 diagnostic_rows.append({"variant": label, **variant, **diagnostic_row})
+        release_memory()
 
     _write_csv(run_dir / "grid_metrics.csv", metrics_rows)
     _write_csv(run_dir / "diagnostics.csv", diagnostic_rows if diagnostic_rows else metrics_rows)

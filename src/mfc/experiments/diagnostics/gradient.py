@@ -22,6 +22,7 @@ from ..core.gradient_steps import (
     make_algorithm,
     pathwise_gradient_step,
 )
+from ..core.memory import release_memory
 from ..core.registry import EnvironmentSpec, build_environment, require_algorithm_name, require_env_name, validate_compatibility
 from ..core.runtime import _aux_batch, _lambda_value, _main_batch, _training_horizon, sample_initial_laws, validation_laws
 from ..core.session import RunResult, normalize_experiment_config, set_seed
@@ -82,6 +83,8 @@ def run_gradient_diagnostic(config: Mapping[str, Any]) -> RunResult:
         sample_rows.extend(artifacts["samples"])
         coordinate_rows.extend(artifacts["coordinates"])
         covariance_rows.extend(artifacts["covariance"])
+        del estimates, stacked, artifacts
+        release_memory()
     return _save_diagnostic_result(
         "diagnose-gradient",
         config,
