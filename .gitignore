@@ -1,18 +1,30 @@
-# Folders
+# Local/generated folders
 .venv/
-archive/
+archive/*
+!archive/experiments/
+!archive/experiments/*.py
 files/
 models/
+runs/
 
-# Notes
+# Documentation
 *.md
 !README.md
+!docs/
+!docs/**/*.md
+!reference/
+!reference/**/*.tex
 
-# Python files
+# Python/cache files
 __pycache__/
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
 cache/
 mfc.egg-info/
+build/
+dist/
 *.pyc
 *.npy
 *.npz
