@@ -5,13 +5,22 @@ import torch
 
 
 class SimplexPerturbedMFREINFORCE:
-    def __init__(self, env):
+    def __init__(self, env, algorithm_config: Optional[Dict[str, object]] = None):
         self.env = env
         self.config = env.config
         self.n_states = env.n_states
+        self.algorithm_config = dict(algorithm_config or {})
 
     def sample_q_batch(self, n: int) -> torch.Tensor:
-        u = self.config.q_sigma * torch.randn(n, self.n_states - 1, dtype=self.config.dtype, device=self.config.device,)
+        if bool(self.algorithm_config.get("antithetic", False)) and n > 1:
+            half = n // 2
+            base = self.config.q_sigma * torch.randn(half, self.n_states - 1, dtype=self.config.dtype, device=self.config.device)
+            pieces = [base, -base]
+            if n % 2:
+                pieces.append(self.config.q_sigma * torch.randn(1, self.n_states - 1, dtype=self.config.dtype, device=self.config.device))
+            u = torch.cat(pieces, dim=0)
+        else:
+            u = self.config.q_sigma * torch.randn(n, self.n_states - 1, dtype=self.config.dtype, device=self.config.device,)
         logits = torch.cat([u, torch.zeros(n, 1, dtype=self.config.dtype, device=self.config.device)], dim=-1,)
         q = torch.softmax(logits, dim=-1).clamp_min(self.config.q_clip)
         return q / q.sum(dim=-1, keepdim=True)

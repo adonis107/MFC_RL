@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Dict, Optional, Tuple
+from typing import Dict, Mapping, Optional, Tuple
 
 import torch
 
@@ -11,10 +11,11 @@ class LogitsPerturbedMFREINFORCE:
     By default this algorithm is model-free and estimates the population flow; callers may also supply a precomputed flow for exact-flow experiments.
     """
 
-    def __init__(self, env):
+    def __init__(self, env, algorithm_config: Optional[Mapping[str, object]] = None):
         self.env = env
         self.config = env.config
         self.n_states = env.n_states
+        self.algorithm_config = dict(algorithm_config or {})
 
     def parameter_vector(self, control) -> torch.Tensor:
         if isinstance(control, torch.nn.Module):
@@ -40,10 +41,18 @@ class LogitsPerturbedMFREINFORCE:
         return torch.softmax(logits + epsilon * lam, dim=-1)
 
     def sample_lambda(self, horizon: int) -> torch.Tensor:
-        return torch.randn(horizon + 1, self.n_states, dtype=self.config.dtype, device=self.config.device)
+        return self._sample_lambda_batch(1, horizon).squeeze(0)
 
     def _sample_lambda_batch(self, batch_size: int, horizon: int) -> torch.Tensor:
-        return torch.randn(batch_size, horizon + 1, self.n_states, dtype=self.config.dtype, device=self.config.device)
+        shape = (horizon + 1, self.n_states)
+        if bool(self.algorithm_config.get("antithetic", False)) and batch_size > 1:
+            half = batch_size // 2
+            base = torch.randn(half, *shape, dtype=self.config.dtype, device=self.config.device)
+            pieces = [base, -base]
+            if batch_size % 2:
+                pieces.append(torch.randn(1, *shape, dtype=self.config.dtype, device=self.config.device))
+            return torch.cat(pieces, dim=0)
+        return torch.randn(batch_size, *shape, dtype=self.config.dtype, device=self.config.device)
 
     def _score_chunk_size(self, param_dim: int, batch_size: int) -> int:
         configured = getattr(self.config, "score_chunk_size", None)
