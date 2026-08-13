@@ -9,8 +9,8 @@ from ._neural_policy_scores import weighted_mlp_policy_score_sums
 
 @dataclass
 class DistributionPlanningConfig:
-    device: torch.device
-    dtype: torch.dtype
+    device: torch.device = torch.device("cuda")
+    dtype: torch.dtype = torch.float64
 
     T: int = 5
     lam: float = 0.01

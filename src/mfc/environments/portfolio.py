@@ -11,7 +11,7 @@ TimeSeriesLike = float | Sequence[float] | torch.Tensor
 
 @dataclass
 class PortfolioConfig:
-    device: torch.device = torch.device("cpu")
+    device: torch.device = torch.device("cuda")
     dtype: torch.dtype = torch.float64
 
     T: int = 10

@@ -7,8 +7,8 @@ import torch
 # Attributes
 @dataclass
 class TwoStateConfig:
-    device: torch.device
-    dtype: torch.dtype
+    device: torch.device = torch.device("cuda")
+    dtype: torch.dtype = torch.float64
     
     T: int = 2
     lam0: float = 0.5

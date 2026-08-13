@@ -10,8 +10,8 @@ from ._neural_policy_scores import weighted_mlp_policy_score_sums
 # Attributes
 @dataclass
 class CybersecurityConfig:
-    device: torch.device
-    dtype: torch.dtype
+    device: torch.device = torch.device("cuda")
+    dtype: torch.dtype = torch.float64
 
     beta_UU: float = 0.3
     beta_UD: float = 0.4

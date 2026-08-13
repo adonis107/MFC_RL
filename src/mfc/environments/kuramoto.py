@@ -12,7 +12,7 @@ Controller = Callable[[int, torch.Tensor, torch.Tensor, Optional[torch.Tensor]],
 
 @dataclass
 class KuramotoConfig:
-    device: torch.device = torch.device("cpu")
+    device: torch.device = torch.device("cuda")
     dtype: torch.dtype = torch.float64
 
     T: int = 100
@@ -46,11 +46,11 @@ class KuramotoConfig:
 
     @property
     def uses_intrinsic_frequencies(self) -> bool:
-        return self.include_frequency or self.sigma_omega > 0.0
+        return self.sigma_omega > 0.0
 
     @property
     def feature_dim(self) -> int:
-        return 10 if self.uses_intrinsic_frequencies else 9
+        return 10 if self.include_frequency else 9
 
     def __post_init__(self) -> None:
         if self.T <= 0:
@@ -205,7 +205,7 @@ class KuramotoMFC:
             torch.sin(self.config.theta_star - phases),
             torch.cos(self.config.theta_star - phases),
         ]
-        if self.config.uses_intrinsic_frequencies:
+        if self.config.include_frequency:
             if frequencies is None:
                 omega = torch.zeros_like(phases)
             else:

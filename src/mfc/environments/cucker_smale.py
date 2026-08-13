@@ -11,7 +11,7 @@ Controller = Callable[[int, torch.Tensor, torch.Tensor], torch.Tensor]
 
 @dataclass
 class CuckerSmaleConfig:
-    device: torch.device = torch.device("cpu")
+    device: torch.device = torch.device("cuda")
     dtype: torch.dtype = torch.float64
 
     T: int = 50

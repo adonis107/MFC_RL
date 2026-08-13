@@ -8,7 +8,7 @@ import torch
 
 @dataclass
 class LQConfig:
-    device: torch.device = torch.device("cpu")
+    device: torch.device = torch.device("cuda")
     dtype: torch.dtype = torch.float64
 
     T: int = 8

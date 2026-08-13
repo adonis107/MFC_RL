@@ -8,8 +8,8 @@ import torch
 
 @dataclass
 class AdvertisingConfig:
-    device: torch.device
-    dtype: torch.dtype
+    device: torch.device = torch.device("cuda")
+    dtype: torch.dtype = torch.float64
 
     T: int = 5
     gamma: float = 0.5
