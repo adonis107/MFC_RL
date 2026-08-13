@@ -346,7 +346,8 @@ The launcher has named presets:
   the few headline estimator figures.
 
 Use `--full` as an alias for `--preset main`, `--force` to rebuild existing
-artifacts, and `--env twostate --env lq` to run only selected benchmarks. The
+artifacts, `--no-progress` for quieter logs, and `--env twostate --env lq` to
+run only selected benchmarks. The
 gap checker reports any coverage rows that are still marked `future` or
 `study-needed`:
 

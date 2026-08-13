@@ -35,6 +35,9 @@ Run a laptop-scale full-repo check:
 prime-run uv run python scripts/run_extended_benchmark_suite.py --env all --preset mid
 ```
 
+The suite launcher prints a per-env/per-seed progress list by default. Use
+`--no-progress` for quieter batch logs.
+
 Run a full paper preset:
 
 ```bash

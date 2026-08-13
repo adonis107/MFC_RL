@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Mapping
+from typing import Any, Callable, Dict, Mapping
 
 from .. import presets as experiment_presets
 from ..application import run_application_diagnostics
@@ -27,6 +27,8 @@ from .configs import (
     continuous_benchmark_config,
 )
 
+ProgressCallback = Callable[[str, str, Path | None], None]
+
 
 def ensure_discrete_benchmark_bundle(
     env_name: str,
@@ -37,6 +39,7 @@ def ensure_discrete_benchmark_bundle(
     extended: bool = False,
     seed: int = 0,
     preset: str | None = None,
+    progress: ProgressCallback | None = None,
 ) -> Dict[str, Any]:
     base_dir = Path(base_dir)
     base_dir.mkdir(parents=True, exist_ok=True)
@@ -50,8 +53,12 @@ def ensure_discrete_benchmark_bundle(
         if algorithm == "simplex":
             primary_config = config
         if force or not (train_dir / "checkpoint.pt").exists():
+            _report(progress, "run", f"train/{algorithm}", train_dir)
             run_train(config)
             release_memory()
+            _report(progress, "done", f"train/{algorithm}", train_dir)
+        else:
+            _report(progress, "skip", f"train/{algorithm}", train_dir)
         bundle["train"][algorithm] = train_dir
 
         app_dir = base_dir / "application" / f"{env_name}_{algorithm}"
@@ -63,23 +70,35 @@ def ensure_discrete_benchmark_bundle(
             "evaluation": dict(config.get("evaluation", {})),
         }
         if force or not (app_dir / "metrics.json").exists():
+            _report(progress, "run", f"application/{algorithm}", app_dir)
             run_application_diagnostics(app_config)
             release_memory()
+            _report(progress, "done", f"application/{algorithm}", app_dir)
+        else:
+            _report(progress, "skip", f"application/{algorithm}", app_dir)
         bundle["application"][algorithm] = app_dir
 
-        bundle["diagnostics"][algorithm] = _ensure_algorithm_diagnostics(env_name, algorithm, base_dir, config, force)
+        bundle["diagnostics"][algorithm] = _ensure_algorithm_diagnostics(env_name, algorithm, base_dir, config, force, progress)
         release_memory()
 
-    bundle["studies"]["budget"] = _ensure_budget_study(env_name, base_dir, force=force, quick=quick, seed=seed, preset=preset_name)
+    bundle["studies"]["budget"] = _ensure_budget_study(
+        env_name, base_dir, force=force, quick=quick, seed=seed, preset=preset_name, progress=progress
+    )
     release_memory()
-    bundle["studies"]["horizon"] = _ensure_horizon_study(env_name, base_dir, force=force, quick=quick, seed=seed, preset=preset_name)
+    bundle["studies"]["horizon"] = _ensure_horizon_study(
+        env_name, base_dir, force=force, quick=quick, seed=seed, preset=preset_name, progress=progress
+    )
     release_memory()
-    bundle["studies"]["optimization"] = _ensure_optimization_summary(env_name, base_dir, bundle, force=force)
+    bundle["studies"]["optimization"] = _ensure_optimization_summary(env_name, base_dir, bundle, force=force, progress=progress)
     release_memory()
     if extended:
         if primary_config is None:
             raise ValueError("Discrete extended studies require a simplex base config.")
-        bundle["studies"].update(_ensure_extended_studies(env_name, base_dir, primary_config, bundle, force=force, quick=quick, preset=preset_name))
+        bundle["studies"].update(
+            _ensure_extended_studies(
+                env_name, base_dir, primary_config, bundle, force=force, quick=quick, preset=preset_name, progress=progress
+            )
+        )
         release_memory()
     (base_dir / "bundle.json").write_text(json.dumps(_jsonable_bundle(bundle), indent=2) + "\n")
     return bundle
@@ -95,6 +114,7 @@ def ensure_continuous_benchmark_bundle(
     extended: bool = False,
     seed: int = 0,
     preset: str | None = None,
+    progress: ProgressCallback | None = None,
 ) -> Dict[str, Any]:
     base_dir = Path(base_dir)
     base_dir.mkdir(parents=True, exist_ok=True)
@@ -105,8 +125,12 @@ def ensure_continuous_benchmark_bundle(
     train_dir = base_dir / "train" / f"{env_name}_{algorithm}"
     config = continuous_benchmark_config(env_name, base_dir / "train", f"{env_name}_{algorithm}", seed=seed, quick=quick, preset=preset_name)
     if force or not (train_dir / "checkpoint.pt").exists():
+        _report(progress, "run", f"train/{algorithm}", train_dir)
         run_train(config)
         release_memory()
+        _report(progress, "done", f"train/{algorithm}", train_dir)
+    else:
+        _report(progress, "skip", f"train/{algorithm}", train_dir)
     bundle["train"][algorithm] = train_dir
 
     app_dir = base_dir / "application" / f"{env_name}_{algorithm}"
@@ -118,20 +142,32 @@ def ensure_continuous_benchmark_bundle(
         "evaluation": dict(config.get("evaluation", {})),
     }
     if force or not (app_dir / "metrics.json").exists():
+        _report(progress, "run", f"application/{algorithm}", app_dir)
         run_application_diagnostics(app_config)
         release_memory()
+        _report(progress, "done", f"application/{algorithm}", app_dir)
+    else:
+        _report(progress, "skip", f"application/{algorithm}", app_dir)
     bundle["application"][algorithm] = app_dir
 
-    bundle["diagnostics"][algorithm] = _ensure_continuous_diagnostics(env_name, base_dir, config, force)
+    bundle["diagnostics"][algorithm] = _ensure_continuous_diagnostics(env_name, base_dir, config, force, progress)
     release_memory()
-    bundle["studies"]["budget"] = _ensure_continuous_budget_study(env_name, base_dir, force=force, quick=quick, seed=seed, preset=preset_name)
+    bundle["studies"]["budget"] = _ensure_continuous_budget_study(
+        env_name, base_dir, force=force, quick=quick, seed=seed, preset=preset_name, progress=progress
+    )
     release_memory()
-    bundle["studies"]["horizon"] = _ensure_continuous_horizon_study(env_name, base_dir, force=force, quick=quick, seed=seed, preset=preset_name)
+    bundle["studies"]["horizon"] = _ensure_continuous_horizon_study(
+        env_name, base_dir, force=force, quick=quick, seed=seed, preset=preset_name, progress=progress
+    )
     release_memory()
-    bundle["studies"]["optimization"] = _ensure_continuous_optimization_summary(env_name, base_dir, bundle, force=force)
+    bundle["studies"]["optimization"] = _ensure_continuous_optimization_summary(
+        env_name, base_dir, bundle, force=force, progress=progress
+    )
     release_memory()
     if extended:
-        bundle["studies"].update(_ensure_extended_studies(env_name, base_dir, config, bundle, force=force, quick=quick, preset=preset_name))
+        bundle["studies"].update(
+            _ensure_extended_studies(env_name, base_dir, config, bundle, force=force, quick=quick, preset=preset_name, progress=progress)
+        )
         release_memory()
     (base_dir / "bundle.json").write_text(json.dumps(_jsonable_bundle(bundle), indent=2) + "\n")
     return bundle
@@ -198,6 +234,7 @@ def _ensure_algorithm_diagnostics(
     base_dir: Path,
     config: Mapping[str, Any],
     force: bool,
+    progress: ProgressCallback | None = None,
 ) -> Dict[str, Path]:
     out: Dict[str, Path] = {}
     runners = {
@@ -213,8 +250,12 @@ def _ensure_algorithm_diagnostics(
         run_dir = base_dir / "diagnostics" / run_name
         diag_config = _with_output(config, base_dir / "diagnostics", run_name)
         if force or not (run_dir / "diagnostics.csv").exists():
+            _report(progress, "run", f"diagnostics/{algorithm}/{name}", run_dir)
             runner(diag_config)
             release_memory()
+            _report(progress, "done", f"diagnostics/{algorithm}/{name}", run_dir)
+        else:
+            _report(progress, "skip", f"diagnostics/{algorithm}/{name}", run_dir)
         out[name] = run_dir
     return out
 
@@ -225,6 +266,7 @@ def _ensure_continuous_diagnostics(
     base_dir: Path,
     config: Mapping[str, Any],
     force: bool,
+    progress: ProgressCallback | None = None,
 ) -> Dict[str, Path]:
     out: Dict[str, Path] = {}
     runners = {
@@ -239,14 +281,27 @@ def _ensure_continuous_diagnostics(
         run_dir = base_dir / "diagnostics" / run_name
         diag_config = _with_output(config, base_dir / "diagnostics", run_name)
         if force or not (run_dir / "diagnostics.csv").exists():
+            _report(progress, "run", f"diagnostics/{CONTINUOUS_ALGORITHM}/{name}", run_dir)
             runner(diag_config)
             release_memory()
+            _report(progress, "done", f"diagnostics/{CONTINUOUS_ALGORITHM}/{name}", run_dir)
+        else:
+            _report(progress, "skip", f"diagnostics/{CONTINUOUS_ALGORITHM}/{name}", run_dir)
         out[name] = run_dir
     return out
 
 
 
-def _ensure_budget_study(env_name: str, base_dir: Path, *, force: bool, quick: bool, seed: int, preset: str) -> Path:
+def _ensure_budget_study(
+    env_name: str,
+    base_dir: Path,
+    *,
+    force: bool,
+    quick: bool,
+    seed: int,
+    preset: str,
+    progress: ProgressCallback | None = None,
+) -> Path:
     run_dir = base_dir / "studies" / "budget_allocation"
     config = benchmark_config(env_name, "simplex", base_dir / "studies", "budget_allocation", seed=seed, quick=quick, preset=preset)
     config["study"] = {
@@ -255,13 +310,26 @@ def _ensure_budget_study(env_name: str, base_dir: Path, *, force: bool, quick: b
         "budgets": experiment_presets.budget_variants(preset),
     }
     if force or not (run_dir / "diagnostics.csv").exists():
+        _report(progress, "run", "studies/budget", run_dir)
         run_budget_allocation(config)
         release_memory()
+        _report(progress, "done", "studies/budget", run_dir)
+    else:
+        _report(progress, "skip", "studies/budget", run_dir)
     return run_dir
 
 
 
-def _ensure_continuous_budget_study(env_name: str, base_dir: Path, *, force: bool, quick: bool, seed: int, preset: str) -> Path:
+def _ensure_continuous_budget_study(
+    env_name: str,
+    base_dir: Path,
+    *,
+    force: bool,
+    quick: bool,
+    seed: int,
+    preset: str,
+    progress: ProgressCallback | None = None,
+) -> Path:
     run_dir = base_dir / "studies" / "budget_allocation"
     config = continuous_benchmark_config(env_name, base_dir / "studies", "budget_allocation", seed=seed, quick=quick, preset=preset)
     config["study"] = {
@@ -270,13 +338,26 @@ def _ensure_continuous_budget_study(env_name: str, base_dir: Path, *, force: boo
         "budgets": experiment_presets.budget_variants(preset),
     }
     if force or not (run_dir / "diagnostics.csv").exists():
+        _report(progress, "run", "studies/budget", run_dir)
         run_budget_allocation(config)
         release_memory()
+        _report(progress, "done", "studies/budget", run_dir)
+    else:
+        _report(progress, "skip", "studies/budget", run_dir)
     return run_dir
 
 
 
-def _ensure_horizon_study(env_name: str, base_dir: Path, *, force: bool, quick: bool, seed: int, preset: str) -> Path:
+def _ensure_horizon_study(
+    env_name: str,
+    base_dir: Path,
+    *,
+    force: bool,
+    quick: bool,
+    seed: int,
+    preset: str,
+    progress: ProgressCallback | None = None,
+) -> Path:
     run_dir = base_dir / "studies" / "horizon_scaling"
     variants = []
     key = "env_config.T_train" if env_name == "cybersecurity" else "env_config.T"
@@ -284,29 +365,53 @@ def _ensure_horizon_study(env_name: str, base_dir: Path, *, force: bool, quick: 
         variants.append({"label": f"T{horizon}", key: horizon, "train.horizon": horizon, "evaluation.horizon": horizon})
     config = benchmark_config(env_name, "simplex", base_dir / "studies", "horizon_scaling", seed=seed, quick=quick, preset=preset)
     if force or not (run_dir / "diagnostics.csv").exists():
+        _report(progress, "run", "studies/horizon", run_dir)
         run_variant_grid(config, "horizon-scaling", variants, default_command="diagnose-gradient")
         release_memory()
+        _report(progress, "done", "studies/horizon", run_dir)
         generated = base_dir / "studies" / "horizon_scaling"
         if generated != run_dir and generated.exists():
             pass
+    else:
+        _report(progress, "skip", "studies/horizon", run_dir)
     return run_dir
 
 
 
-def _ensure_continuous_horizon_study(env_name: str, base_dir: Path, *, force: bool, quick: bool, seed: int, preset: str) -> Path:
+def _ensure_continuous_horizon_study(
+    env_name: str,
+    base_dir: Path,
+    *,
+    force: bool,
+    quick: bool,
+    seed: int,
+    preset: str,
+    progress: ProgressCallback | None = None,
+) -> Path:
     run_dir = base_dir / "studies" / "horizon_scaling"
     variants = []
     for horizon in experiment_presets.horizons(env_name, preset):
         variants.append({"label": f"T{horizon}", "env_config.T": horizon, "train.horizon": horizon, "evaluation.horizon": horizon})
     config = continuous_benchmark_config(env_name, base_dir / "studies", "horizon_scaling", seed=seed, quick=quick, preset=preset)
     if force or not (run_dir / "diagnostics.csv").exists():
+        _report(progress, "run", "studies/horizon", run_dir)
         run_variant_grid(config, "horizon-scaling", variants, default_command="diagnose-gradient")
         release_memory()
+        _report(progress, "done", "studies/horizon", run_dir)
+    else:
+        _report(progress, "skip", "studies/horizon", run_dir)
     return run_dir
 
 
 
-def _ensure_optimization_summary(env_name: str, base_dir: Path, bundle: Mapping[str, Any], *, force: bool) -> Path:
+def _ensure_optimization_summary(
+    env_name: str,
+    base_dir: Path,
+    bundle: Mapping[str, Any],
+    *,
+    force: bool,
+    progress: ProgressCallback | None = None,
+) -> Path:
     run_dir = base_dir / "studies" / "optimization_summary"
     config = {
         "env": env_name,
@@ -318,13 +423,24 @@ def _ensure_optimization_summary(env_name: str, base_dir: Path, bundle: Mapping[
         },
     }
     if force or not (run_dir / "diagnostics.csv").exists():
+        _report(progress, "run", "studies/optimization", run_dir)
         run_optimization_summary(config)
         release_memory()
+        _report(progress, "done", "studies/optimization", run_dir)
+    else:
+        _report(progress, "skip", "studies/optimization", run_dir)
     return run_dir
 
 
 
-def _ensure_continuous_optimization_summary(env_name: str, base_dir: Path, bundle: Mapping[str, Any], *, force: bool) -> Path:
+def _ensure_continuous_optimization_summary(
+    env_name: str,
+    base_dir: Path,
+    bundle: Mapping[str, Any],
+    *,
+    force: bool,
+    progress: ProgressCallback | None = None,
+) -> Path:
     run_dir = base_dir / "studies" / "optimization_summary"
     config = {
         "env": env_name,
@@ -336,8 +452,12 @@ def _ensure_continuous_optimization_summary(env_name: str, base_dir: Path, bundl
         },
     }
     if force or not (run_dir / "diagnostics.csv").exists():
+        _report(progress, "run", "studies/optimization", run_dir)
         run_optimization_summary(config)
         release_memory()
+        _report(progress, "done", "studies/optimization", run_dir)
+    else:
+        _report(progress, "skip", "studies/optimization", run_dir)
     return run_dir
 
 
@@ -367,6 +487,7 @@ def _ensure_extended_studies(
     force: bool,
     quick: bool,
     preset: str,
+    progress: ProgressCallback | None = None,
 ) -> Dict[str, Path]:
     paths = _extended_study_paths(base_dir, env_name)
     train_paths = dict(bundle.get("train", {}))
@@ -393,8 +514,12 @@ def _ensure_extended_studies(
     for name, study_config in study_configs.items():
         run_dir = paths[name]
         if force or not (run_dir / "diagnostics.csv").exists():
+            _report(progress, "run", f"studies/{name}", run_dir)
             run_study(study_config)
             release_memory()
+            _report(progress, "done", f"studies/{name}", run_dir)
+        else:
+            _report(progress, "skip", f"studies/{name}", run_dir)
         out[name] = run_dir
     return out
 
@@ -463,6 +588,12 @@ def _with_output(config: Mapping[str, Any], output_dir: Path, run_name: str) -> 
     copied["train"]["run_name"] = run_name
     copied["train"]["overwrite"] = True
     return copied
+
+
+
+def _report(progress: ProgressCallback | None, status: str, label: str, path: Path | None = None) -> None:
+    if progress is not None:
+        progress(status, label, path)
 
 
 
