@@ -1,8 +1,6 @@
 # Local/generated folders
 .venv/
-archive/*
-!archive/experiments/
-!archive/experiments/*.py
+archive/
 files/
 models/
 runs/
