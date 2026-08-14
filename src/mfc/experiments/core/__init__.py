@@ -1,4 +1,5 @@
 from .registry import (
+    BASELINE_ALGORITHMS,
     CONTINUOUS_ALGORITHMS,
     DEFAULT_DEVICE,
     ENVIRONMENTS,
@@ -14,6 +15,7 @@ from .memory import release_memory
 from .session import RunResult, load_checkpoint, normalize_experiment_config, set_seed
 
 __all__ = [
+    "BASELINE_ALGORITHMS",
     "CONTINUOUS_ALGORITHMS",
     "DEFAULT_DEVICE",
     "ENVIRONMENTS",

@@ -1,5 +1,6 @@
 from .application import run_application_diagnostics
 from .core import (
+    BASELINE_ALGORITHMS,
     CONTINUOUS_ALGORITHMS,
     DEFAULT_DEVICE,
     ENVIRONMENTS,

@@ -30,7 +30,7 @@ def make_algorithm(algorithm_name: str, env: Any, algorithm_config: Optional[Map
         return ConsistentAdaptiveSimplexMFREINFORCE(env, _controller_config(algorithm_config))
     if algorithm_name == "continuous-mfreinforce":
         return ContinuousTransportMFREINFORCE(env, algorithm_config)
-    if algorithm_name in EXACT_ALGORITHMS | PATHWISE_ALGORITHMS:
+    if algorithm_name in EXACT_ALGORITHMS | PATHWISE_ALGORITHMS or algorithm_name == "reinforce":
         return None
     raise ValueError(f"Unknown algorithm {algorithm_name!r}.")
 

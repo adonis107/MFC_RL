@@ -39,6 +39,7 @@ FINITE_ALGORITHMS = {
 EXACT_ALGORITHMS = {"exact-gradient"}
 PATHWISE_ALGORITHMS = {"pathwise-gradient"}
 CONTINUOUS_ALGORITHMS = {"continuous-mfreinforce"}
+BASELINE_ALGORITHMS = {"reinforce"}
 DEFAULT_DEVICE = "cuda"
 
 
@@ -111,8 +112,8 @@ def validate_compatibility(env_name: str, algorithm_name: str) -> None:
         raise ValueError(f"{algorithm_name!r} requires a pathwise-gradient environment, got {env_name!r}.")
     if algorithm_name in CONTINUOUS_ALGORITHMS and spec.family == "finite":
         raise ValueError(f"{algorithm_name!r} requires a continuous-state environment, got {env_name!r}.")
-    if algorithm_name not in FINITE_ALGORITHMS | EXACT_ALGORITHMS | PATHWISE_ALGORITHMS | CONTINUOUS_ALGORITHMS:
-        choices = ", ".join(sorted(FINITE_ALGORITHMS | EXACT_ALGORITHMS | PATHWISE_ALGORITHMS | CONTINUOUS_ALGORITHMS))
+    if algorithm_name not in FINITE_ALGORITHMS | EXACT_ALGORITHMS | PATHWISE_ALGORITHMS | CONTINUOUS_ALGORITHMS | BASELINE_ALGORITHMS:
+        choices = ", ".join(sorted(FINITE_ALGORITHMS | EXACT_ALGORITHMS | PATHWISE_ALGORITHMS | CONTINUOUS_ALGORITHMS | BASELINE_ALGORITHMS))
         raise ValueError(f"Unknown algorithm {algorithm_name!r}. Choices: {choices}.")
 
 
@@ -189,6 +190,7 @@ def _dataclass_kwargs(config_cls: type, raw: Mapping[str, Any], device: torch.de
 
 __all__ = [
     "CONTINUOUS_ALGORITHMS",
+    "BASELINE_ALGORITHMS",
     "DEFAULT_DEVICE",
     "ENVIRONMENTS",
     "EXACT_ALGORITHMS",

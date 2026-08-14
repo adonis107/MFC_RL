@@ -41,6 +41,7 @@ from mfc.experiments.core.gradient_steps import (
     make_algorithm,
     pathwise_gradient_step,
 )
+from mfc.experiments.core.reinforce import reinforce_gradient_step
 from mfc.experiments.core.registry import (
     CONTINUOUS_ALGORITHMS,
     DEFAULT_DEVICE,
@@ -87,6 +88,7 @@ def run_train(config: Mapping[str, Any]) -> RunResult:
     flow_mode = str(train_config.get("flow_mode", "exact"))
     flow_particles = int(train_config.get("flow_particles", max(1, B)))
     history_control_coordinates = int(train_config.get("history_control_coordinates", 8))
+    grad_clip_norm = train_config.get("grad_clip_norm")
 
     control = initialize_control(spec, env)
     optimizer = torch.optim.Adam(control_parameters(control), lr=lr)
@@ -108,18 +110,30 @@ def run_train(config: Mapping[str, Any]) -> RunResult:
                 raise ValueError("Finite training requires sampled initial laws.")
             mu0 = initial_laws[episode].to(dtype=env.config.dtype, device=env.config.device)
             mu_flow = finite_population_flow(env, algorithm, control, mu0, horizon, flow_mode, flow_particles)
-            grad, diag = finite_gradient(
-                algorithm_name,
-                algorithm,
-                control,
-                mu0,
-                mu_flow,
-                episode,
-                B,
-                n_aux,
-                algorithm_config,
-                train_config,
-            )
+            if algorithm_name == "reinforce":
+                objective, grad, diag = reinforce_gradient_step(
+                    spec,
+                    env,
+                    control,
+                    algorithm_config,
+                    train_config,
+                    episode,
+                    mu0=mu0,
+                    mu_flow=mu_flow,
+                )
+            else:
+                grad, diag = finite_gradient(
+                    algorithm_name,
+                    algorithm,
+                    control,
+                    mu0,
+                    mu_flow,
+                    episode,
+                    B,
+                    n_aux,
+                    algorithm_config,
+                    train_config,
+                )
             assign_gradient(control, grad, spec.objective)
         elif algorithm_name == "exact-gradient":
             objective, grad, diag = exact_gradient_step(spec, env, control, algorithm_config)  # type: ignore[arg-type]
@@ -137,8 +151,15 @@ def run_train(config: Mapping[str, Any]) -> RunResult:
                 episode,
             )
             assign_gradient(control, grad, spec.objective)
+        elif algorithm_name == "reinforce":
+            objective, grad, diag = reinforce_gradient_step(spec, env, control, algorithm_config, train_config, episode)
+            assign_gradient(control, grad, spec.objective)
         else:
             raise ValueError(f"Unsupported training mode for {algorithm_name!r}.")
+        if grad_clip_norm is not None:
+            clipped = torch.nn.utils.clip_grad_norm_(list(control_parameters(control)), float(grad_clip_norm))
+            diag = dict(diag)
+            diag["clipped_grad_norm"] = clipped.detach() if torch.is_tensor(clipped) else torch.tensor(float(clipped), device=env.config.device)
         optimizer.step()
 
         if episode % validate_every == 0 or episode == steps - 1:

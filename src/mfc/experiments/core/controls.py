@@ -11,10 +11,7 @@ def initialize_control(spec: EnvironmentSpec, env: Any) -> torch.Tensor | torch.
     if spec.name == "twostate":
         return torch.nn.Parameter(torch.zeros(env.n_states, dtype=env.config.dtype, device=env.config.device))
     if spec.policy_cls is not None:
-        if hasattr(env, "zero_policy"):
-            policy = env.zero_policy()
-        else:
-            policy = spec.policy_cls(env.config)
+        policy = spec.policy_cls(env.config)
         policy.train(True)
         for parameter in policy.parameters():
             parameter.requires_grad_(True)

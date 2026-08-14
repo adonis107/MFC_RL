@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional, Sequence
 
 from .core.artifacts import _metadata, _write_csv, _write_json, apply_overrides, load_json_config
 from .core.registry import (
+    BASELINE_ALGORITHMS,
     CONTINUOUS_ALGORITHMS,
     DEFAULT_DEVICE,
     ENVIRONMENTS,
@@ -54,7 +55,7 @@ def _add_common_arguments(parser: argparse.ArgumentParser, *, algorithm: bool = 
     if algorithm:
         parser.add_argument(
             "--algorithm",
-            choices=sorted(FINITE_ALGORITHMS | EXACT_ALGORITHMS | PATHWISE_ALGORITHMS | CONTINUOUS_ALGORITHMS),
+            choices=sorted(FINITE_ALGORITHMS | EXACT_ALGORITHMS | PATHWISE_ALGORITHMS | CONTINUOUS_ALGORITHMS | BASELINE_ALGORITHMS),
             help="Algorithm registry name.",
         )
     parser.add_argument("--output-dir", help="Directory where run artifacts are written.")

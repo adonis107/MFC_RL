@@ -23,6 +23,7 @@ from ..core.gradient_steps import (
     pathwise_gradient_step,
 )
 from ..core.memory import release_memory
+from ..core.reinforce import reinforce_gradient_step
 from ..core.registry import EnvironmentSpec, build_environment, require_algorithm_name, require_env_name, validate_compatibility
 from ..core.runtime import _aux_batch, _lambda_value, _main_batch, _training_horizon, sample_initial_laws, validation_laws
 from ..core.session import RunResult, normalize_experiment_config, set_seed
@@ -121,6 +122,18 @@ def single_gradient_estimate(
         flow_particles = int(train_config.get("flow_particles", max(1, B)))
         mu0 = sample_initial_laws(spec, env, 1, train_config)[0]
         mu_flow = finite_population_flow(env, algorithm, control, mu0, horizon, flow_mode, flow_particles)
+        if algorithm_name == "reinforce":
+            _, grad, _ = reinforce_gradient_step(
+                spec,
+                env,
+                control,
+                algorithm_config,
+                train_config,
+                iteration,
+                mu0=mu0,
+                mu_flow=mu_flow,
+            )
+            return grad.detach().reshape(-1)
         grad, _ = finite_gradient(
             algorithm_name,
             algorithm,
@@ -149,6 +162,9 @@ def single_gradient_estimate(
             train_config,
             iteration,
         )
+        return grad.detach().reshape(-1)
+    if algorithm_name == "reinforce":
+        _, grad, _ = reinforce_gradient_step(spec, env, control, algorithm_config, train_config, iteration)
         return grad.detach().reshape(-1)
     raise ValueError(f"Unsupported gradient diagnostic for {algorithm_name!r}.")
 
