@@ -9,8 +9,9 @@ from ..core.registry import DEFAULT_DEVICE as _REGISTRY_DEFAULT_DEVICE
 
 DISCRETE_BENCHMARKS = ["twostate", "advertising", "cybersecurity", "distribution-planning"]
 CONTINUOUS_BENCHMARKS = ["lq", "portfolio", "cucker-smale", "kuramoto"]
-ALGORITHMS = ["simplex", "logits"]
+ALGORITHMS = ["simplex", "logits", "reinforce"]
 CONTINUOUS_ALGORITHM = "continuous-mfreinforce"
+CONTINUOUS_ALGORITHMS = [CONTINUOUS_ALGORITHM, "reinforce"]
 DEFAULT_DEVICE = _REGISTRY_DEFAULT_DEVICE
 
 
@@ -41,11 +42,18 @@ def benchmark_config(
     hidden = experiment_presets.hidden_units(env_name, preset_name)
     horizon = experiment_presets.nominal_horizon(env_name, preset_name)
     diagnostic = experiment_presets.diagnostic_config(preset_name)
+    if algorithm == "simplex":
+        algorithm_config: Dict[str, Any] = {"lambda": 0.1, "eta": 0.1}
+    elif algorithm == "logits":
+        algorithm_config = {"epsilon": 0.1, "flow_particles": B}
+    else:
+        algorithm_config = {"baseline": "batch_mean"}
+
     config: Dict[str, Any] = {
         "env": env_name,
         "algorithm": algorithm,
         "env_config": {"device": DEFAULT_DEVICE, "dtype": "float64"},
-        "algorithm_config": {"lambda": 0.1, "eta": 0.1} if algorithm == "simplex" else {"epsilon": 0.1, "flow_particles": B},
+        "algorithm_config": algorithm_config,
         "train": {
             "output_dir": str(output_dir),
             "run_name": run_name,
@@ -123,6 +131,7 @@ def continuous_benchmark_config(
     output_dir: Path | str,
     run_name: str,
     *,
+    algorithm: str = CONTINUOUS_ALGORITHM,
     seed: int = 0,
     steps: int | None = None,
     quick: bool = True,
@@ -130,6 +139,8 @@ def continuous_benchmark_config(
 ) -> Dict[str, Any]:
     if env_name not in CONTINUOUS_BENCHMARKS:
         raise ValueError(f"Expected one of {CONTINUOUS_BENCHMARKS}, got {env_name!r}.")
+    if algorithm not in CONTINUOUS_ALGORITHMS:
+        raise ValueError(f"Expected one of {CONTINUOUS_ALGORITHMS}, got {algorithm!r}.")
 
     preset_name = experiment_presets.resolve_preset(preset, quick=quick)
     B, n = experiment_presets.batch_sizes(env_name, preset_name)
@@ -140,9 +151,9 @@ def continuous_benchmark_config(
     diagnostic = experiment_presets.diagnostic_config(preset_name)
     config: Dict[str, Any] = {
         "env": env_name,
-        "algorithm": CONTINUOUS_ALGORITHM,
+        "algorithm": algorithm,
         "env_config": {"device": DEFAULT_DEVICE, "dtype": "float64", "T": horizon},
-        "algorithm_config": {"lambda": 0.1, "eta": 0.1},
+        "algorithm_config": {"lambda": 0.1, "eta": 0.1} if algorithm == CONTINUOUS_ALGORITHM else {"baseline": "batch_mean"},
         "train": {
             "output_dir": str(output_dir),
             "run_name": run_name,
@@ -162,12 +173,14 @@ def continuous_benchmark_config(
         config["env_config"].update({"return_distribution": "normal"})
     elif env_name == "cucker-smale":
         config["env_config"].update({"hidden_units": hidden, "N_pop": population_particles, "N_val": validation_particles})
+        config["train"]["grad_clip_norm"] = 10.0
         config["train"]["population_particles"] = population_particles
         config["algorithm_config"]["population_particles"] = population_particles
         config["diagnostic"].update(_pathwise_oracle_defaults(population_particles, preset_name))
         config["evaluation"].update(_continuous_reference_defaults(env_name, validation_particles, preset_name))
     elif env_name == "kuramoto":
         config["env_config"].update({"hidden_units": hidden, "N_pop": population_particles, "N_val": validation_particles})
+        config["train"]["grad_clip_norm"] = 10.0
         config["train"]["population_particles"] = population_particles
         config["algorithm_config"]["population_particles"] = population_particles
         config["diagnostic"].update(_pathwise_oracle_defaults(population_particles, preset_name))
@@ -237,6 +250,7 @@ def _continuous_reference_defaults(env_name: str, validation_particles: int, pre
 __all__ = [
     "ALGORITHMS",
     "CONTINUOUS_ALGORITHM",
+    "CONTINUOUS_ALGORITHMS",
     "CONTINUOUS_BENCHMARKS",
     "DEFAULT_DEVICE",
     "DISCRETE_BENCHMARKS",

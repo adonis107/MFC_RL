@@ -22,6 +22,7 @@ from ..studies import (
 from .configs import (
     ALGORITHMS,
     CONTINUOUS_ALGORITHM,
+    CONTINUOUS_ALGORITHMS,
     DISCRETE_BENCHMARKS,
     benchmark_config,
     continuous_benchmark_config,
@@ -118,40 +119,54 @@ def ensure_continuous_benchmark_bundle(
 ) -> Dict[str, Any]:
     base_dir = Path(base_dir)
     base_dir.mkdir(parents=True, exist_ok=True)
-    algorithm = CONTINUOUS_ALGORITHM
     preset_name = experiment_presets.resolve_preset(preset, quick=quick)
     bundle: Dict[str, Any] = {"env": env_name, "base_dir": base_dir, "train": {}, "application": {}, "diagnostics": {}, "studies": {}}
 
-    train_dir = base_dir / "train" / f"{env_name}_{algorithm}"
-    config = continuous_benchmark_config(env_name, base_dir / "train", f"{env_name}_{algorithm}", seed=seed, quick=quick, preset=preset_name)
-    if force or not (train_dir / "checkpoint.pt").exists():
-        _report(progress, "run", f"train/{algorithm}", train_dir)
-        run_train(config)
-        release_memory()
-        _report(progress, "done", f"train/{algorithm}", train_dir)
-    else:
-        _report(progress, "skip", f"train/{algorithm}", train_dir)
-    bundle["train"][algorithm] = train_dir
+    primary_config: Dict[str, Any] | None = None
+    for algorithm in CONTINUOUS_ALGORITHMS:
+        train_dir = base_dir / "train" / f"{env_name}_{algorithm}"
+        config = continuous_benchmark_config(
+            env_name,
+            base_dir / "train",
+            f"{env_name}_{algorithm}",
+            algorithm=algorithm,
+            seed=seed,
+            quick=quick,
+            preset=preset_name,
+        )
+        if algorithm == CONTINUOUS_ALGORITHM:
+            primary_config = config
+        if force or not (train_dir / "checkpoint.pt").exists():
+            _report(progress, "run", f"train/{algorithm}", train_dir)
+            run_train(config)
+            release_memory()
+            _report(progress, "done", f"train/{algorithm}", train_dir)
+        else:
+            _report(progress, "skip", f"train/{algorithm}", train_dir)
+        bundle["train"][algorithm] = train_dir
 
-    app_dir = base_dir / "application" / f"{env_name}_{algorithm}"
-    app_config = {
-        "env": env_name,
-        "algorithm": algorithm,
-        "checkpoint": str(train_dir / "checkpoint.pt"),
-        "train": {"output_dir": str(base_dir / "application"), "run_name": f"{env_name}_{algorithm}", "overwrite": True, "seed": 0},
-        "evaluation": dict(config.get("evaluation", {})),
-    }
-    if force or not (app_dir / "metrics.json").exists():
-        _report(progress, "run", f"application/{algorithm}", app_dir)
-        run_application_diagnostics(app_config)
-        release_memory()
-        _report(progress, "done", f"application/{algorithm}", app_dir)
-    else:
-        _report(progress, "skip", f"application/{algorithm}", app_dir)
-    bundle["application"][algorithm] = app_dir
+        app_dir = base_dir / "application" / f"{env_name}_{algorithm}"
+        app_config = {
+            "env": env_name,
+            "algorithm": algorithm,
+            "checkpoint": str(train_dir / "checkpoint.pt"),
+            "train": {"output_dir": str(base_dir / "application"), "run_name": f"{env_name}_{algorithm}", "overwrite": True, "seed": 0},
+            "evaluation": dict(config.get("evaluation", {})),
+        }
+        if force or not (app_dir / "metrics.json").exists():
+            _report(progress, "run", f"application/{algorithm}", app_dir)
+            run_application_diagnostics(app_config)
+            release_memory()
+            _report(progress, "done", f"application/{algorithm}", app_dir)
+        else:
+            _report(progress, "skip", f"application/{algorithm}", app_dir)
+        bundle["application"][algorithm] = app_dir
 
-    bundle["diagnostics"][algorithm] = _ensure_continuous_diagnostics(env_name, base_dir, config, force, progress)
-    release_memory()
+        bundle["diagnostics"][algorithm] = _ensure_continuous_diagnostics(env_name, algorithm, base_dir, config, force, progress)
+        release_memory()
+
+    if primary_config is None:
+        raise ValueError("Continuous bundles require a continuous-mfreinforce base config.")
     bundle["studies"]["budget"] = _ensure_continuous_budget_study(
         env_name, base_dir, force=force, quick=quick, seed=seed, preset=preset_name, progress=progress
     )
@@ -166,7 +181,7 @@ def ensure_continuous_benchmark_bundle(
     release_memory()
     if extended:
         bundle["studies"].update(
-            _ensure_extended_studies(env_name, base_dir, config, bundle, force=force, quick=quick, preset=preset_name, progress=progress)
+            _ensure_extended_studies(env_name, base_dir, primary_config, bundle, force=force, quick=quick, preset=preset_name, progress=progress)
         )
         release_memory()
     (base_dir / "bundle.json").write_text(json.dumps(_jsonable_bundle(bundle), indent=2) + "\n")
@@ -203,20 +218,14 @@ def bundle_paths(env_name: str, base_dir: Path | str) -> Dict[str, Any]:
 
 def continuous_bundle_paths(env_name: str, base_dir: Path | str) -> Dict[str, Any]:
     base_dir = Path(base_dir)
-    algorithm = CONTINUOUS_ALGORITHM
     return {
         "env": env_name,
         "base_dir": base_dir,
-        "train": {algorithm: base_dir / "train" / f"{env_name}_{algorithm}"},
-        "application": {algorithm: base_dir / "application" / f"{env_name}_{algorithm}"},
+        "train": {algorithm: base_dir / "train" / f"{env_name}_{algorithm}" for algorithm in CONTINUOUS_ALGORITHMS},
+        "application": {algorithm: base_dir / "application" / f"{env_name}_{algorithm}" for algorithm in CONTINUOUS_ALGORITHMS},
         "diagnostics": {
-            algorithm: {
-                "perturbation": base_dir / "diagnostics" / f"{env_name}_{algorithm}_perturbation",
-                "functional_law": base_dir / "diagnostics" / f"{env_name}_{algorithm}_functional_law",
-                "gradient": base_dir / "diagnostics" / f"{env_name}_{algorithm}_gradient",
-                "score": base_dir / "diagnostics" / f"{env_name}_{algorithm}_score",
-                "sensitivity": base_dir / "diagnostics" / f"{env_name}_{algorithm}_sensitivity",
-            }
+            algorithm: _continuous_diagnostic_paths(base_dir, env_name, algorithm)
+            for algorithm in CONTINUOUS_ALGORITHMS
         },
         "studies": {
             "budget": base_dir / "studies" / "budget_allocation",
@@ -224,6 +233,19 @@ def continuous_bundle_paths(env_name: str, base_dir: Path | str) -> Dict[str, An
             "optimization": base_dir / "studies" / "optimization_summary",
             **_extended_study_paths(base_dir, env_name),
         },
+    }
+
+
+
+def _continuous_diagnostic_paths(base_dir: Path, env_name: str, algorithm: str) -> Dict[str, Path]:
+    if algorithm == "reinforce":
+        return {"gradient": base_dir / "diagnostics" / f"{env_name}_{algorithm}_gradient"}
+    return {
+        "perturbation": base_dir / "diagnostics" / f"{env_name}_{algorithm}_perturbation",
+        "functional_law": base_dir / "diagnostics" / f"{env_name}_{algorithm}_functional_law",
+        "gradient": base_dir / "diagnostics" / f"{env_name}_{algorithm}_gradient",
+        "score": base_dir / "diagnostics" / f"{env_name}_{algorithm}_score",
+        "sensitivity": base_dir / "diagnostics" / f"{env_name}_{algorithm}_sensitivity",
     }
 
 
@@ -237,14 +259,17 @@ def _ensure_algorithm_diagnostics(
     progress: ProgressCallback | None = None,
 ) -> Dict[str, Path]:
     out: Dict[str, Path] = {}
-    runners = {
-        "perturbation": run_perturbation_diagnostic,
-        "functional_law": run_functional_law_diagnostic,
-        "gradient": run_gradient_diagnostic,
-        "score": run_score_validation,
-    }
-    if algorithm == "simplex":
-        runners["sensitivity"] = run_sensitivity_diagnostic
+    if algorithm == "reinforce":
+        runners = {"gradient": run_gradient_diagnostic}
+    else:
+        runners = {
+            "perturbation": run_perturbation_diagnostic,
+            "functional_law": run_functional_law_diagnostic,
+            "gradient": run_gradient_diagnostic,
+            "score": run_score_validation,
+        }
+        if algorithm == "simplex":
+            runners["sensitivity"] = run_sensitivity_diagnostic
     for name, runner in runners.items():
         run_name = f"{env_name}_{algorithm}_{name}"
         run_dir = base_dir / "diagnostics" / run_name
@@ -263,30 +288,34 @@ def _ensure_algorithm_diagnostics(
 
 def _ensure_continuous_diagnostics(
     env_name: str,
+    algorithm: str,
     base_dir: Path,
     config: Mapping[str, Any],
     force: bool,
     progress: ProgressCallback | None = None,
 ) -> Dict[str, Path]:
     out: Dict[str, Path] = {}
-    runners = {
-        "perturbation": run_perturbation_diagnostic,
-        "functional_law": run_functional_law_diagnostic,
-        "gradient": run_gradient_diagnostic,
-        "score": run_score_validation,
-        "sensitivity": run_sensitivity_diagnostic,
-    }
+    if algorithm == "reinforce":
+        runners = {"gradient": run_gradient_diagnostic}
+    else:
+        runners = {
+            "perturbation": run_perturbation_diagnostic,
+            "functional_law": run_functional_law_diagnostic,
+            "gradient": run_gradient_diagnostic,
+            "score": run_score_validation,
+            "sensitivity": run_sensitivity_diagnostic,
+        }
     for name, runner in runners.items():
-        run_name = f"{env_name}_{CONTINUOUS_ALGORITHM}_{name}"
+        run_name = f"{env_name}_{algorithm}_{name}"
         run_dir = base_dir / "diagnostics" / run_name
         diag_config = _with_output(config, base_dir / "diagnostics", run_name)
         if force or not (run_dir / "diagnostics.csv").exists():
-            _report(progress, "run", f"diagnostics/{CONTINUOUS_ALGORITHM}/{name}", run_dir)
+            _report(progress, "run", f"diagnostics/{algorithm}/{name}", run_dir)
             runner(diag_config)
             release_memory()
-            _report(progress, "done", f"diagnostics/{CONTINUOUS_ALGORITHM}/{name}", run_dir)
+            _report(progress, "done", f"diagnostics/{algorithm}/{name}", run_dir)
         else:
-            _report(progress, "skip", f"diagnostics/{CONTINUOUS_ALGORITHM}/{name}", run_dir)
+            _report(progress, "skip", f"diagnostics/{algorithm}/{name}", run_dir)
         out[name] = run_dir
     return out
 
@@ -448,7 +477,7 @@ def _ensure_continuous_optimization_summary(
         "train": {"output_dir": str(base_dir / "studies"), "run_name": "optimization_summary", "overwrite": True},
         "study": {
             "name": "optimization-summary",
-            "input_dirs": [str(bundle["train"][CONTINUOUS_ALGORITHM])],
+            "input_dirs": [str(path) for path in bundle["train"].values()],
         },
     }
     if force or not (run_dir / "diagnostics.csv").exists():
