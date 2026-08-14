@@ -27,6 +27,8 @@ Legend:
 | Batched vector-Jacobian products via `is_grads_batched=True` | neural policy score methods | Run one autograd call per sample/group | Converts many per-sample gradient computations into fewer batched AD calls | **No result change**, except floating-point roundoff |
 | Optional score diagnostics | `keep_score_diagnostics` | Always store per-sample score vectors | Per-sample scores are expensive and only needed for diagnostics | **No training result change** when disabled; only diagnostic files are smaller |
 | Batch-mean return baselines | simplex, continuous MF-REINFORCE | Use raw returns in the score-function estimator | Reduces gradient variance substantially | **Changes finite-sample behavior**. With the same batch used to estimate the baseline, there can be a small finite-batch bias; asymptotically it vanishes. Use `baseline=null` for the raw estimator |
+| Nonzero neural-policy initialization | `experiments/core/controls.py` | Initialize pathwise neural policies through an all-zero controller | Zeroing every hidden weight can freeze hidden-layer learning in Tanh policies because only the final bias receives gradient at initialization | **Changes initialization only**. The objective and estimator are unchanged, but the optimizer starts from a trainable point |
+| Classical REINFORCE baseline mode | `experiments/core/reinforce.py` | Compare only MF-REINFORCE/oracle modes | Provides a no-mean-field-score comparator for every benchmark family | **Deliberate different mode**. It omits the population-law score terms by design |
 
 ## Discrete MF-REINFORCE Optimizations
 
