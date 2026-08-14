@@ -210,11 +210,13 @@ def plot_perturbation_geometry(diagnostics: Mapping[str, Mapping[str, pd.DataFra
         upper = frame.get("distance_q90", frame["distance_mean"])
         axes[1].plot(frame["lambda"], frame["distance_mean"], marker="o", label=algorithm)
         axes[1].fill_between(frame["lambda"], lower, upper, alpha=0.2)
-    axes[0].set_title("Mean perturbation distance")
-    axes[0].set_xlabel("lambda")
+    axes[0].set_title("Mean perturbation distance $E[d(M^\\lambda,\\mu)]$")
+    axes[0].set_xlabel("perturbation scale $\\lambda$ or $\\epsilon$")
+    axes[0].set_ylabel("$E[d(M^\\lambda,\\mu)]$")
     axes[0].legend()
-    axes[1].set_title("Distance quantile bands")
-    axes[1].set_xlabel("lambda")
+    axes[1].set_title("Distance quantile bands for $d(M^\\lambda,\\mu)$")
+    axes[1].set_xlabel("perturbation scale $\\lambda$ or $\\epsilon$")
+    axes[1].set_ylabel("$d(M^\\lambda,\\mu)$")
     axes[1].legend()
     fig.tight_layout()
 
@@ -248,8 +250,8 @@ def plot_perturbation_slopes(diagnostics: Mapping[str, Mapping[str, pd.DataFrame
         return
     ax.axhline(1.0, linestyle="--", linewidth=1.0, color="black", alpha=0.5)
     ax.set_title("Empirical perturbation distance slope")
-    ax.set_xlabel("lambda midpoint")
-    ax.set_ylabel("local log-log slope")
+    ax.set_xlabel("perturbation midpoint")
+    ax.set_ylabel("local slope of $\\log E[d]$ vs $\\log \\lambda$")
     ax.legend()
     fig.tight_layout()
 
@@ -263,37 +265,71 @@ def plot_functional_law(diagnostics: Mapping[str, Mapping[str, pd.DataFrame]]) -
             continue
         axes[0].plot(frame["lambda"], frame["standardized_norm_mean"], marker="o", label=algorithm)
         axes[1].plot(frame["lambda"], frame["covariance_trace"], marker="o", label=algorithm)
-    axes[0].set_title("Standardized signature perturbation norm")
-    axes[0].set_xlabel("lambda")
+    axes[0].set_title("Mean standardized signature perturbation")
+    axes[0].set_xlabel("perturbation scale $\\lambda$")
+    axes[0].set_ylabel("$E[\\| (\\Gamma(M^\\lambda)-\\Gamma(\\mu))/\\lambda \\|]$")
     axes[0].legend()
-    axes[1].set_title("Functional covariance trace")
-    axes[1].set_xlabel("lambda")
+    axes[1].set_title("Functional-law covariance trace")
+    axes[1].set_xlabel("perturbation scale $\\lambda$")
+    axes[1].set_ylabel("$\\operatorname{tr}\\operatorname{Cov}(\\Gamma(M^\\lambda))$")
     axes[1].legend()
     fig.tight_layout()
 
 
 
 def plot_functional_signature_means(diagnostics: Mapping[str, Mapping[str, pd.DataFrame]]) -> None:
-    fig, axes = plt.subplots(1, 2, figsize=(13, 4))
-    any_data = False
+    long_frames = []
+    dim_frames = []
     for algorithm, data in diagnostics.items():
         frame = _numeric_sorted(data.get("functional_law", pd.DataFrame()), "lambda")
         columns = [column for column in frame.columns if column.startswith("signature_mean_")]
         if frame.empty or not columns:
             continue
-        for column in columns[:8]:
-            axes[0].plot(frame["lambda"], frame[column], marker="o", label=f"{algorithm}: {column.removeprefix('signature_mean_')}")
+        long = frame.melt(id_vars=["lambda"], value_vars=columns, var_name="coordinate", value_name="mean")
+        long["coordinate"] = long["coordinate"].astype(str).str.removeprefix("signature_mean_").astype(int)
+        long["algorithm"] = algorithm
+        long_frames.append(long)
         if "signature_dim" in frame:
-            axes[1].plot(frame["lambda"], frame["signature_dim"], marker="o", label=algorithm)
-        any_data = True
-    if not any_data:
-        plt.close(fig)
+            dim = frame[["lambda", "signature_dim"]].copy()
+            dim["algorithm"] = algorithm
+            dim_frames.append(dim)
+    if not long_frames:
         return
-    axes[0].set_title("Signature coordinate means")
-    axes[0].set_xlabel("lambda")
+
+    combined = pd.concat(long_frames, ignore_index=True)
+    max_coordinate_count = int(combined.groupby("algorithm")["coordinate"].nunique().max())
+    if max_coordinate_count > 6:
+        algorithms = list(combined["algorithm"].dropna().unique())
+        fig, axes = plt.subplots(1, len(algorithms), figsize=(5.5 * len(algorithms), 4), squeeze=False)
+        for ax, algorithm in zip(axes[0], algorithms):
+            subset = combined[combined["algorithm"] == algorithm]
+            pivot = subset.pivot_table(index="coordinate", columns="lambda", values="mean", aggfunc="mean").sort_index()
+            if pivot.empty:
+                continue
+            image = ax.imshow(pivot.values, aspect="auto")
+            ax.set_title(f"{algorithm}: $E[\\Gamma_i(M^\\lambda)]$")
+            ax.set_xlabel("perturbation scale $\\lambda$")
+            ax.set_ylabel("signature coordinate $i$")
+            ax.set_xticks(range(len(pivot.columns)), [str(col) for col in pivot.columns])
+            ax.set_yticks(range(len(pivot.index)), [str(idx) for idx in pivot.index])
+            fig.colorbar(image, ax=ax, label="$E[\\Gamma_i(M^\\lambda)]$")
+        fig.tight_layout()
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4))
+    for (algorithm, coordinate), subset in combined.groupby(["algorithm", "coordinate"]):
+        axes[0].plot(subset["lambda"], subset["mean"], marker="o", label=f"{algorithm}: $i={int(coordinate)}$")
+    if dim_frames:
+        dim_combined = pd.concat(dim_frames, ignore_index=True)
+        for algorithm, subset in dim_combined.groupby("algorithm"):
+            axes[1].plot(subset["lambda"], subset["signature_dim"], marker="o", label=algorithm)
+    axes[0].set_title("Signature coordinate means $E[\\Gamma_i(M^\\lambda)]$")
+    axes[0].set_xlabel("perturbation scale $\\lambda$")
+    axes[0].set_ylabel("$E[\\Gamma_i(M^\\lambda)]$")
     axes[0].legend(fontsize="small", ncols=2)
-    axes[1].set_title("Signature dimension")
-    axes[1].set_xlabel("lambda")
+    axes[1].set_title("Signature dimension $d_\\Gamma$")
+    axes[1].set_xlabel("perturbation scale $\\lambda$")
+    axes[1].set_ylabel("$d_\\Gamma$")
     axes[1].legend()
     fig.tight_layout()
 
@@ -326,9 +362,13 @@ def plot_functional_sample_diagnostics(diagnostics: Mapping[str, Mapping[str, pd
             )
             if len(pair.columns) >= 2:
                 axes[2].scatter(pair.iloc[:, 0], pair.iloc[:, 1], alpha=0.6, label=algorithm)
-    axes[0].set_title("Signature coordinate samples")
-    axes[1].set_title("Standardized signature samples")
-    axes[2].set_title("Signature pair scatter")
+    axes[0].set_title("Samples of one signature coordinate $\\Gamma_i(M^\\lambda)$")
+    axes[0].set_xlabel("$\\Gamma_i(M^\\lambda)$")
+    axes[1].set_title("Standardized samples $(\\Gamma_i(M^\\lambda)-\\Gamma_i(\\mu))/\\lambda$")
+    axes[1].set_xlabel("standardized value")
+    axes[2].set_title("Pair scatter of standardized signature coordinates")
+    axes[2].set_xlabel("coordinate 1 standardized value")
+    axes[2].set_ylabel("coordinate 2 standardized value")
     for ax in axes:
         ax.legend()
     fig.tight_layout()
@@ -344,11 +384,14 @@ def plot_score_validation(diagnostics: Mapping[str, Mapping[str, pd.DataFrame]])
         axes[0].plot(frame["lambda"], frame["mean_norm"], marker="o", label=algorithm)
         axes[1].loglog(frame["lambda"], frame["variance_trace"], marker="o", label=algorithm)
         axes[2].plot(frame["lambda"], frame["lambda2_variance_trace"], marker="o", label=algorithm)
-    axes[0].set_title("Score mean norm")
-    axes[1].set_title("Score variance trace")
-    axes[2].set_title("lambda^2 score variance")
+    axes[0].set_title("Score mean norm $\\|E[S_\\lambda]\\|$")
+    axes[0].set_ylabel("$\\|E[S_\\lambda]\\|$")
+    axes[1].set_title("Score variance trace $\\operatorname{tr}\\operatorname{Cov}(S_\\lambda)$")
+    axes[1].set_ylabel("$\\operatorname{tr}\\operatorname{Cov}(S_\\lambda)$")
+    axes[2].set_title("Scaled score variance $\\lambda^2\\operatorname{tr}\\operatorname{Cov}(S_\\lambda)$")
+    axes[2].set_ylabel("$\\lambda^2\\operatorname{tr}\\operatorname{Cov}(S_\\lambda)$")
     for ax in axes:
-        ax.set_xlabel("lambda")
+        ax.set_xlabel("perturbation scale $\\lambda$")
         ax.legend()
     fig.tight_layout()
 
@@ -369,17 +412,27 @@ def plot_score_coordinate_diagnostics(diagnostics: Mapping[str, Mapping[str, pd.
     for column in ("lambda", "coordinate", "mean", "variance", "second_moment"):
         if column in combined:
             combined[column] = pd.to_numeric(combined[column], errors="coerce")
+    combined = combined.replace([math.inf, -math.inf], pd.NA).dropna(subset=["coordinate", "variance"])
+    if combined.empty:
+        return
     fig, axes = plt.subplots(1, 2, figsize=(13, 4))
     for algorithm, subset in combined.groupby("algorithm"):
-        grouped = subset.groupby("coordinate", as_index=False)["variance"].mean().sort_values("variance", ascending=False).head(20)
-        axes[0].plot(grouped["coordinate"].astype(str), grouped["variance"], marker="o", label=algorithm)
-        axes[1].scatter(subset["mean"], subset["variance"], label=algorithm, alpha=0.75)
-    axes[0].set_title("Top score coordinate variances")
-    axes[0].set_xlabel("coordinate")
+        positive = subset[pd.to_numeric(subset["variance"], errors="coerce") > 0.0]
+        if positive.empty:
+            continue
+        grouped = positive.groupby("coordinate", as_index=False)["variance"].mean().sort_values("variance", ascending=False).head(20)
+        axes[0].plot(grouped["coordinate"].astype(int).astype(str), grouped["variance"], marker="o", label=algorithm)
+        axes[1].scatter(positive["mean"], positive["variance"], label=algorithm, alpha=0.65)
+    axes[0].set_title("Largest score-coordinate variances $\\operatorname{Var}(S_i)$")
+    axes[0].set_xlabel("score coordinate $i$")
+    axes[0].set_ylabel("$\\operatorname{Var}(S_i)$")
+    axes[0].set_yscale("log")
     axes[0].tick_params(axis="x", rotation=45)
-    axes[1].set_title("Score coordinate mean vs variance")
-    axes[1].set_xlabel("mean")
-    axes[1].set_ylabel("variance")
+    axes[1].set_title("Score-coordinate mean vs variance")
+    axes[1].set_xlabel("$E[S_i]$")
+    axes[1].set_ylabel("$\\operatorname{Var}(S_i)$")
+    axes[1].set_xscale("symlog", linthresh=1e-12)
+    axes[1].set_yscale("log")
     for ax in axes:
         ax.legend()
     fig.tight_layout()
@@ -389,12 +442,12 @@ def plot_score_coordinate_diagnostics(diagnostics: Mapping[str, Mapping[str, pd.
 def plot_gradient_validation(diagnostics: Mapping[str, Mapping[str, pd.DataFrame]]) -> None:
     fig, axes = plt.subplots(2, 3, figsize=(15, 8))
     columns = [
-        ("relative_bias", "Relative bias"),
-        ("variance_trace", "Variance trace"),
-        ("mse", "MSE"),
-        ("bias_norm", "Bias norm"),
-        ("cosine_similarity", "Cosine similarity"),
-        ("norm_ratio", "Norm ratio"),
+        ("relative_bias", "Relative bias $\\|E[\\hat g]-g\\|/\\|g\\|$"),
+        ("variance_trace", "Gradient variance trace $\\operatorname{tr}\\operatorname{Cov}(\\hat g)$"),
+        ("mse", "Gradient MSE $E[\\|\\hat g-g\\|^2]$"),
+        ("bias_norm", "Gradient bias norm $\\|E[\\hat g]-g\\|$"),
+        ("cosine_similarity", "Cosine similarity $\\cos(\\hat g,g)$"),
+        ("norm_ratio", "Norm ratio $\\|E[\\hat g]\\|/\\|g\\|$"),
     ]
     for ax, (column, title) in zip(axes.reshape(-1), columns):
         plot_title = title
@@ -405,12 +458,12 @@ def plot_gradient_validation(diagnostics: Mapping[str, Mapping[str, pd.DataFrame
                 continue
             if plot_column not in frame and column in {"relative_bias", "bias_norm", "mse", "cosine_similarity", "norm_ratio"}:
                 plot_column = "estimate_norm"
-                plot_title = "Estimate norm"
+                plot_title = "Estimate norm $\\|\\hat g\\|$"
             if plot_column not in frame:
                 continue
             ax.plot(frame["lambda"], frame[plot_column], marker="o", label=algorithm)
         ax.set_title(plot_title)
-        ax.set_xlabel("lambda")
+        ax.set_xlabel("diagnostic scale $\\lambda$ or $\\epsilon$")
         ax.legend()
     fig.tight_layout()
 
@@ -437,9 +490,9 @@ def plot_gradient_error_decomposition(diagnostics: Mapping[str, Mapping[str, pd.
     if not any_data:
         plt.close(fig)
         return
-    ax.set_title("Gradient error decomposition")
-    ax.set_xlabel("lambda")
-    ax.set_ylabel("norm scale")
+    ax.set_title("Gradient error decomposition vs perturbation scale")
+    ax.set_xlabel("diagnostic scale $\\lambda$ or $\\epsilon$")
+    ax.set_ylabel("bias norm, $\\sqrt{\\operatorname{tr}\\operatorname{Cov}}$, or RMSE")
     ax.legend(fontsize="small", ncols=2)
     fig.tight_layout()
 
@@ -472,13 +525,15 @@ def plot_gradient_coordinate_diagnostics(diagnostics: Mapping[str, Mapping[str, 
         sign = combined.groupby(["algorithm", "lambda"], as_index=False)["sign_accuracy"].mean()
         for algorithm, subset in sign.groupby("algorithm"):
             axes[2].plot(subset["lambda"], subset["sign_accuracy"], marker="o", label=algorithm)
-    axes[0].set_title("Oracle vs estimated coordinates")
-    axes[0].set_xlabel("oracle")
-    axes[0].set_ylabel("estimate mean")
-    axes[1].set_title("CI coverage")
-    axes[1].set_xlabel("lambda")
-    axes[2].set_title("Sign accuracy")
-    axes[2].set_xlabel("lambda")
+    axes[0].set_title("Oracle vs estimated gradient coordinates")
+    axes[0].set_xlabel("oracle coordinate $g_i$")
+    axes[0].set_ylabel("estimated mean coordinate $E[\\hat g_i]$")
+    axes[1].set_title("Coordinate CI coverage")
+    axes[1].set_xlabel("diagnostic scale $\\lambda$ or $\\epsilon$")
+    axes[1].set_ylabel("coverage probability")
+    axes[2].set_title("Coordinate sign accuracy")
+    axes[2].set_xlabel("diagnostic scale $\\lambda$ or $\\epsilon$")
+    axes[2].set_ylabel("$P[\\operatorname{sign}(\\hat g_i)=\\operatorname{sign}(g_i)]$")
     for ax in axes:
         ax.legend()
     fig.tight_layout()
@@ -501,10 +556,10 @@ def plot_sensitivity_validation(diagnostics: Mapping[str, Mapping[str, pd.DataFr
     for eta, subset in frame.groupby("eta"):
         axes[0].plot(subset["time"], subset[error_column], marker="o", label=f"eta={eta}")
         axes[1].plot(subset["time"], subset["variance_trace"], marker="o", label=f"eta={eta}")
-    axes[0].set_title("Sensitivity MSE vs time" if error_column == "mse" else "Sensitivity norm vs time")
-    axes[1].set_title("Sensitivity variance vs time")
+    axes[0].set_title("Sensitivity MSE $E[\\|\\hat D_t-D_t\\|^2]$ vs time" if error_column == "mse" else "Sensitivity estimate norm $\\|\\hat D_t\\|$ vs time")
+    axes[1].set_title("Sensitivity variance trace $\\operatorname{tr}\\operatorname{Cov}(\\hat D_t)$")
     for ax in axes:
-        ax.set_xlabel("time")
+        ax.set_xlabel("time $t$")
         ax.legend()
     fig.tight_layout()
 

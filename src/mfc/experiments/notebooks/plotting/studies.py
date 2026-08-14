@@ -18,29 +18,32 @@ def plot_budget_and_horizon(studies: Mapping[str, pd.DataFrame]) -> None:
     budget = studies.get("budget", pd.DataFrame())
     budget_metric = _preferred_study_metric(budget)
     if not budget.empty and budget_metric is not None:
+        budget_label = _metric_label(budget_metric)
         budget = budget.copy()
         budget["B"] = pd.to_numeric(_series_or_variant_number(budget, ["train.B", "B"], r"B(\d+)"), errors="coerce")
         budget["n"] = pd.to_numeric(_series_or_variant_number(budget, ["train.n", "n"], r"n(\d+)"), errors="coerce")
         pivot = budget.pivot_table(index="n", columns="B", values=budget_metric, aggfunc="mean")
         if not pivot.empty:
             image = axes[0].imshow(pivot.values, aspect="auto")
-            axes[0].set_title(f"{budget_metric.replace('_', ' ')} heatmap over B:n")
-            axes[0].set_xlabel("B")
-            axes[0].set_ylabel("n")
+            axes[0].set_title(f"{budget_label} over main/auxiliary budget")
+            axes[0].set_xlabel("main batch $B$")
+            axes[0].set_ylabel("auxiliary batch $n$")
             axes[0].set_xticks(range(len(pivot.columns)), [str(col) for col in pivot.columns])
             axes[0].set_yticks(range(len(pivot.index)), [str(idx) for idx in pivot.index])
-            fig.colorbar(image, ax=axes[0])
+            fig.colorbar(image, ax=axes[0], label=budget_label)
     horizon = studies.get("horizon", pd.DataFrame())
     horizon_metric = _preferred_study_metric(horizon)
     if not horizon.empty and horizon_metric is not None:
+        horizon_label = _metric_label(horizon_metric)
         horizon = horizon.copy()
         label_col = "env_config.T_train" if "env_config.T_train" in horizon else "env_config.T"
         horizon["horizon"] = pd.to_numeric(_series_or_variant_number(horizon, [label_col, "T"], r"T(\d+)"), errors="coerce")
         grouped = horizon.dropna(subset=["horizon"]).groupby("horizon", as_index=False)[horizon_metric].mean()
         if not grouped.empty:
             axes[1].plot(grouped["horizon"], grouped[horizon_metric], marker="o")
-        axes[1].set_title(f"Gradient {horizon_metric.replace('_', ' ')} vs horizon")
-        axes[1].set_xlabel("T")
+        axes[1].set_title(f"Gradient {horizon_label} vs horizon")
+        axes[1].set_xlabel("horizon $T$")
+        axes[1].set_ylabel(horizon_label)
     fig.tight_layout()
 
 
@@ -51,6 +54,7 @@ def plot_budget_pareto(studies: Mapping[str, pd.DataFrame], grid_metrics: Mappin
     metric = _preferred_study_metric(budget)
     if budget.empty or grid.empty or metric is None:
         return
+    metric_label = _metric_label(metric)
     merged = budget.copy()
     if "variant" in merged and "variant" in grid:
         merged = merged.merge(grid[["variant", "elapsed_seconds"]], on="variant", how="left")
@@ -74,19 +78,19 @@ def plot_budget_pareto(studies: Mapping[str, pd.DataFrame], grid_metrics: Mappin
     fig, axes = plt.subplots(1, 3, figsize=(15, 4))
     for label, subset in merged.groupby("variant" if "variant" in merged else "index"):
         axes[0].scatter(subset["elapsed_seconds"], subset[metric], label=str(label), alpha=0.8)
-    axes[0].set_title(f"{metric.replace('_', ' ')} vs runtime")
+    axes[0].set_title(f"{metric_label} vs runtime")
     axes[0].set_xlabel("elapsed seconds")
-    axes[0].set_ylabel(metric)
+    axes[0].set_ylabel(metric_label)
     if merged["B"].notna().any():
         grouped = merged.groupby("B", as_index=False)[metric].mean()
         axes[1].plot(grouped["B"], grouped[metric], marker="o")
-    axes[1].set_title(f"{metric.replace('_', ' ')} vs B")
-    axes[1].set_xlabel("B")
+    axes[1].set_title(f"{metric_label} vs main batch $B$")
+    axes[1].set_xlabel("main batch $B$")
     if merged["n"].notna().any():
         grouped = merged.groupby("n", as_index=False)[metric].mean()
         axes[2].plot(grouped["n"], grouped[metric], marker="o")
-    axes[2].set_title(f"{metric.replace('_', ' ')} vs n")
-    axes[2].set_xlabel("n")
+    axes[2].set_title(f"{metric_label} vs auxiliary batch $n$")
+    axes[2].set_xlabel("auxiliary batch $n$")
     axes[0].legend(fontsize="small")
     fig.tight_layout()
 
@@ -121,8 +125,9 @@ def plot_optimizer_bias_summary(studies: Mapping[str, pd.DataFrame]) -> None:
     fig, axes = plt.subplots(1, len(metric_columns), figsize=(5 * len(metric_columns), 4), squeeze=False)
     for ax, column in zip(axes[0], metric_columns):
         ax.plot(frame["lambda"], pd.to_numeric(frame[column], errors="coerce"), marker="o")
-        ax.set_title(column.replace("_", " "))
-        ax.set_xlabel("lambda")
+        ax.set_title(_metric_label(column))
+        ax.set_xlabel("perturbation scale $\\lambda$")
+        ax.set_ylabel(_metric_label(column))
     fig.tight_layout()
 
 
@@ -139,8 +144,8 @@ def plot_robustness_summary(studies: Mapping[str, pd.DataFrame]) -> None:
         return
     fig, ax = plt.subplots(figsize=(max(8, 0.8 * len(grouped)), 4))
     ax.bar(grouped["variant"].astype(str), grouped[metric])
-    ax.set_title(f"Robustness: {metric.replace('_', ' ')}")
-    ax.set_ylabel(metric)
+    ax.set_title(f"Robustness: {_metric_label(metric)}")
+    ax.set_ylabel(_metric_label(metric))
     ax.tick_params(axis="x", rotation=35)
     fig.tight_layout()
 
@@ -158,8 +163,8 @@ def plot_adaptive_lambda_summary(studies: Mapping[str, pd.DataFrame], grid_metri
             grouped = _group_for_category_plot(summary, "variant", metric)
             if not grouped.empty:
                 axes[0].bar(grouped["variant"].astype(str), grouped[metric])
-                axes[0].set_title(f"Adaptive vs fixed: {metric.replace('_', ' ')}")
-                axes[0].set_ylabel(metric)
+                axes[0].set_title(f"Adaptive vs fixed: {_metric_label(metric)}")
+                axes[0].set_ylabel(_metric_label(metric))
                 axes[0].tick_params(axis="x", rotation=35)
     if not trace.empty and {"variant", "episode", "lambda"}.issubset(trace.columns):
         trace = trace.copy()
@@ -190,7 +195,8 @@ def plot_ablation_and_signature_summary(studies: Mapping[str, pd.DataFrame], gri
             grouped = signature.dropna(subset=[x]).groupby(x, as_index=False)[metric].mean()
             if not grouped.empty:
                 axes[1].plot(grouped[x], grouped[metric], marker="o")
-                axes[1].set_xlabel("signature dimension")
+                axes[1].set_xlabel("signature dimension $d_\\Gamma$")
+                axes[1].set_ylabel(_metric_label(metric))
         else:
             _plot_variant_metric(axes[1], signature, "Signature")
         axes[1].set_title("Signature ablation")
@@ -217,6 +223,35 @@ def _preferred_study_metric(frame: pd.DataFrame) -> str | None:
         if column in frame and frame[column].notna().any():
             return column
     return None
+
+
+
+def _metric_label(metric: str) -> str:
+    labels = {
+        "mse": "MSE $E[\\|\\hat g-g\\|^2]$",
+        "relative_bias": "relative bias $\\|E[\\hat g]-g\\|/\\|g\\|$",
+        "variance_trace": "variance trace $\\operatorname{tr}\\operatorname{Cov}(\\hat g)$",
+        "estimate_norm": "estimate norm $\\|\\hat g\\|$",
+        "standardized_norm_mean": "$E[\\|(\\Gamma(M^\\lambda)-\\Gamma(\\mu))/\\lambda\\|]$",
+        "covariance_trace": "$\\operatorname{tr}\\operatorname{Cov}(\\Gamma(M^\\lambda))$",
+        "signature_distance_mean": "mean signature distance",
+        "distance_mean": "mean perturbation distance $E[d(M^\\lambda,\\mu)]$",
+        "objective_gap": "objective gap",
+        "optimal_value_bias_proxy": "optimal-value bias proxy",
+        "control_distance": "control distance",
+        "trajectory_distance": "trajectory distance",
+        "policy_output_distance": "policy-output distance",
+        "value": "value $J(\\theta)$",
+        "objective": "objective $J(\\theta)$",
+        "cost": "cost",
+        "metric_value": "value $J(\\theta)$",
+        "metric_objective": "objective $J(\\theta)$",
+        "metric_cost": "cost",
+        "terminal_mean": "terminal mean",
+        "terminal_variance": "terminal variance",
+        "elapsed_seconds": "elapsed seconds",
+    }
+    return labels.get(metric, metric.replace("_", " "))
 
 
 
@@ -296,7 +331,7 @@ def _plot_variant_metric(ax: Any, frame: pd.DataFrame, title: str) -> None:
         ax.set_title(title)
         return
     ax.bar(grouped[category].astype(str), grouped[metric])
-    ax.set_title(f"{title}: {metric.replace('_', ' ')}")
+    ax.set_title(f"{title}: {_metric_label(metric)}")
     ax.tick_params(axis="x", rotation=35)
 
 
@@ -328,8 +363,9 @@ def _plot_particle_metric(ax: Any, frame: pd.DataFrame) -> None:
         _plot_variant_metric(ax, frame, "Particle approximation")
         return
     ax.plot(grouped[x_col], grouped[metric], marker="o")
-    ax.set_title(f"Particle approximation: {metric.replace('_', ' ')}")
+    ax.set_title(f"Particle approximation: {_metric_label(metric)}")
     ax.set_xlabel("particles")
+    ax.set_ylabel(_metric_label(metric))
 
 
 
@@ -350,12 +386,12 @@ def _plot_transfer_heatmap(ax: Any, frame: pd.DataFrame) -> None:
         _plot_variant_metric(ax, frame, "Particle transfer")
         return
     image = ax.imshow(pivot.values, aspect="auto")
-    ax.set_title(f"Particle transfer: {metric.replace('_', ' ')}")
+    ax.set_title(f"Particle transfer: {_metric_label(metric)}")
     ax.set_xlabel("eval particles")
     ax.set_ylabel("train particles")
     ax.set_xticks(range(len(pivot.columns)), [str(col) for col in pivot.columns])
     ax.set_yticks(range(len(pivot.index)), [str(idx) for idx in pivot.index])
-    ax.figure.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+    ax.figure.colorbar(image, ax=ax, fraction=0.046, pad=0.04, label=_metric_label(metric))
 
 
 
@@ -376,8 +412,9 @@ def _plot_scaling_metric(ax: Any, frame: pd.DataFrame) -> None:
         _plot_variant_metric(ax, frame, "Scaling")
         return
     ax.plot(grouped[x_col], grouped[metric], marker="o")
-    ax.set_title(f"Scaling: {metric.replace('_', ' ')}")
+    ax.set_title(f"Scaling: {_metric_label(metric)}")
     ax.set_xlabel(x_col)
+    ax.set_ylabel(_metric_label(metric))
 
 
 

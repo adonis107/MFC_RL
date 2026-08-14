@@ -10,21 +10,34 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 
+def _first_nonempty(application_data: Mapping[str, Mapping[str, pd.DataFrame]], key: str, required: set[str]) -> pd.DataFrame:
+    for data in application_data.values():
+        frame = data.get(key, pd.DataFrame())
+        if not frame.empty and required.issubset(frame.columns):
+            return frame
+    return pd.DataFrame()
+
+
+
 def plot_continuous_time_metrics(application_data: Mapping[str, Mapping[str, pd.DataFrame]], env_name: str) -> None:
     if env_name in {"lq", "portfolio"}:
         fig, axes = plt.subplots(1, 2, figsize=(13, 4))
+        reference = _first_nonempty(application_data, "time_metrics", {"time", "optimal_mean", "optimal_variance"})
         for algorithm, data in application_data.items():
             metrics = data["time_metrics"]
             if metrics.empty:
                 continue
             axes[0].plot(metrics["time"], metrics["mean"], marker="o", label=f"{algorithm} mean")
-            axes[0].plot(metrics["time"], metrics["optimal_mean"], linestyle="--", label="optimal mean")
             axes[1].plot(metrics["time"], metrics["variance"], marker="o", label=f"{algorithm} variance")
-            axes[1].plot(metrics["time"], metrics["optimal_variance"], linestyle="--", label="optimal variance")
-        axes[0].set_title("Mean trajectory")
-        axes[1].set_title("Variance trajectory")
+        if not reference.empty:
+            axes[0].plot(reference["time"], reference["optimal_mean"], linestyle="--", linewidth=1.8, color="black", label="optimal mean")
+            axes[1].plot(reference["time"], reference["optimal_variance"], linestyle="--", linewidth=1.8, color="black", label="optimal variance")
+        axes[0].set_title("Mean trajectory $m_t$")
+        axes[0].set_ylabel("$m_t$")
+        axes[1].set_title("Variance trajectory $\\operatorname{Var}(X_t)$")
+        axes[1].set_ylabel("$\\operatorname{Var}(X_t)$")
         for ax in axes:
-            ax.set_xlabel("time")
+            ax.set_xlabel("time $t$")
             ax.legend()
         fig.tight_layout()
         return
@@ -47,7 +60,8 @@ def plot_continuous_time_metrics(application_data: Mapping[str, Mapping[str, pd.
             else:
                 ax.plot(metrics["time"], metrics[column], marker="o", label=algorithm)
         ax.set_title(column.replace("_", " "))
-        ax.set_xlabel("time")
+        ax.set_xlabel("time $t$")
+        ax.set_ylabel(column.replace("_", " "))
         ax.legend()
     fig.tight_layout()
 
@@ -57,13 +71,23 @@ def plot_continuous_policy_and_samples(application_data: Mapping[str, Mapping[st
     if env_name not in {"lq", "portfolio"}:
         return
     fig, axes = plt.subplots(1, 4, figsize=(20, 4))
+    optimal_drawn: set[int] = set()
     for algorithm, data in application_data.items():
         policy = data["policy"]
         if not policy.empty:
             for coordinate, subset in policy.groupby("coordinate"):
                 label = f"{algorithm}: theta[{int(coordinate)}]"
                 axes[int(coordinate)].plot(subset["time"], subset["value"], marker="o", label=label)
-                axes[int(coordinate)].plot(subset["time"], subset["optimal"], linestyle="--", label=f"optimal theta[{int(coordinate)}]")
+                if int(coordinate) not in optimal_drawn and "optimal" in subset:
+                    axes[int(coordinate)].plot(
+                        subset["time"],
+                        subset["optimal"],
+                        linestyle="--",
+                        linewidth=1.8,
+                        color="black",
+                        label=f"optimal theta[{int(coordinate)}]",
+                    )
+                    optimal_drawn.add(int(coordinate))
         samples = data["terminal_samples"]
         if not samples.empty:
             ordered = samples[samples["stat"].astype(str).str.startswith("q")]
@@ -77,11 +101,12 @@ def plot_continuous_policy_and_samples(application_data: Mapping[str, Mapping[st
             if not landscape.empty:
                 grouped = landscape.groupby("theta0", as_index=False)["cost"].min()
                 axes[3].plot(grouped["theta0"], grouped["cost"], marker="o", label=algorithm)
-    axes[0].set_title("State/fluctuation gain")
-    axes[1].set_title("Mean/level gain")
+    axes[0].set_title("State/fluctuation gain $\\theta_{t,0}$")
+    axes[1].set_title("Mean/level gain $\\theta_{t,1}$")
     axes[2].set_title("Terminal quantiles")
-    axes[3].set_title("Frontier / landscape slice")
-    for ax in axes:
+    axes[3].set_title("Efficient frontier or objective landscape")
+    for idx, ax in enumerate(axes):
+        ax.set_xlabel("time $t$" if idx < 2 else "")
         ax.legend()
     fig.tight_layout()
 
@@ -147,9 +172,11 @@ def plot_continuous_application_details(application_data: Mapping[str, Mapping[s
                 if "mean" in table and "std" in table:
                     axes[2].bar([f"{algorithm} mean", f"{algorithm} std"], [table["mean"], table["std"]], alpha=0.75)
         axes[0].set_title("Moment error vs oracle")
-        axes[0].set_xlabel("time")
-        axes[1].set_title("Mean absolute gain error")
-        axes[1].set_xlabel("time")
+        axes[0].set_xlabel("time $t$")
+        axes[0].set_ylabel("absolute error")
+        axes[1].set_title("Mean absolute gain error $|\\theta-\\theta^\\star|$")
+        axes[1].set_xlabel("time $t$")
+        axes[1].set_ylabel("mean absolute error")
         axes[2].set_title("Terminal mean and spread")
         for ax in axes[:2]:
             ax.legend(fontsize="small")
@@ -170,8 +197,9 @@ def plot_continuous_application_details(application_data: Mapping[str, Mapping[s
                 for time_value, subset in snapshots.groupby("time"):
                     axes[1].hist(subset["velocity"], bins=12, alpha=0.35, label=f"t={time_value}")
                 axes[2].scatter(snapshots["position"], snapshots["velocity"], c=snapshots["time"], s=18, alpha=0.7)
-        axes[0].set_title("Cumulative control energy")
-        axes[0].set_xlabel("time")
+        axes[0].set_title("Cumulative control energy $\\sum_t \\|u_t\\|^2$")
+        axes[0].set_xlabel("time $t$")
+        axes[0].set_ylabel("energy")
         axes[1].set_title("Velocity histograms")
         axes[1].set_xlabel("velocity")
         axes[2].set_title("Phase-space samples colored by time")
@@ -196,8 +224,9 @@ def plot_continuous_application_details(application_data: Mapping[str, Mapping[s
                     axes[1].hist(subset["phase"], bins=12, alpha=0.35, label=f"t={time_value}")
                 axes[2].scatter(snapshots["cos_phase"], snapshots["sin_phase"], c=snapshots["time"], s=18, alpha=0.7)
                 axes[2].set_aspect("equal", adjustable="box")
-        axes[0].set_title("Cumulative control energy")
-        axes[0].set_xlabel("time")
+        axes[0].set_title("Cumulative control energy $\\sum_t \\|u_t\\|^2$")
+        axes[0].set_xlabel("time $t$")
+        axes[0].set_ylabel("energy")
         axes[1].set_title("Phase histograms")
         axes[1].set_xlabel("phase")
         axes[2].set_title("Phase circle samples colored by time")

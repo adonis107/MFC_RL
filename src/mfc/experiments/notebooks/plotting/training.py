@@ -21,11 +21,13 @@ def plot_training_comparison(histories: Mapping[str, pd.DataFrame]) -> None:
             axes[0].plot(x, history[y_col], marker="o", label=algorithm)
         if "grad_norm" in history:
             axes[1].plot(x, history["grad_norm"], marker="o", label=algorithm)
-    axes[0].set_title("Training value/objective")
-    axes[0].set_xlabel("episode")
+    axes[0].set_title("Training objective/value $J(\\theta_k)$")
+    axes[0].set_xlabel("training episode $k$")
+    axes[0].set_ylabel("$J(\\theta_k)$ or evaluated cost")
     axes[0].legend()
-    axes[1].set_title("Gradient norm")
-    axes[1].set_xlabel("episode")
+    axes[1].set_title("Gradient-estimate norm $\\|\\hat g_k\\|$")
+    axes[1].set_xlabel("training episode $k$")
+    axes[1].set_ylabel("$\\|\\hat g_k\\|$")
     axes[1].legend()
     fig.tight_layout()
 
