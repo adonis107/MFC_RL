@@ -178,7 +178,7 @@ class SimplexPerturbedMFREINFORCE:
         q_path = self.sample_q_batch(B * (horizon + 1)).reshape(B, horizon + 1, self.n_states)
         states = torch.zeros(B, horizon + 1, dtype=torch.long, device=self.config.device)
         actions = torch.zeros(B, horizon, dtype=torch.long, device=self.config.device)
-        returns = torch.zeros(B, dtype=self.config.dtype, device=self.config.device)
+        stage_returns = torch.zeros(B, horizon, dtype=self.config.dtype, device=self.config.device)
 
         states[:, 0] = torch.multinomial(mu_flow[0], num_samples=B, replacement=True)
         for t in range(horizon):
@@ -186,20 +186,23 @@ class SimplexPerturbedMFREINFORCE:
             states_t = states[:, t]
             actions_t = self.env.sample_actions_batch(control, t, states_t, M_t)
             actions[:, t] = actions_t
-            returns = returns + self.discount(t) * self.env.reward_batch(states_t, M_t, actions_t)
+            stage_returns[:, t] = self.discount(t) * self.env.reward_batch(states_t, M_t, actions_t)
             states[:, t + 1] = self.env.sample_next_states_batch(states_t, actions_t, M_t)
 
         M_T = (1.0 - eps_law) * mu_flow[horizon].unsqueeze(0) + eps_law * q_path[:, horizon]
-        returns = returns + self.discount(horizon) * self.env.terminal_reward_batch(states[:, horizon], M_T)
+        returns_to_go = torch.zeros(B, horizon + 1, dtype=self.config.dtype, device=self.config.device)
+        returns_to_go[:, horizon] = self.discount(horizon) * self.env.terminal_reward_batch(states[:, horizon], M_T)
+        for t in range(horizon - 1, -1, -1):
+            returns_to_go[:, t] = stage_returns[:, t] + returns_to_go[:, t + 1]
 
         if baseline == "batch_mean":
-            b0 = returns.mean()
+            b0 = returns_to_go[:, 0].mean()
         elif baseline is None:
             b0 = torch.zeros((), dtype=self.config.dtype, device=self.config.device)
         else:
             b0 = torch.tensor(float(baseline), dtype=self.config.dtype, device=self.config.device)
 
-        centered_returns = returns - b0
+        centered_returns = returns_to_go - b0
         policy_score_sum = torch.zeros(param_dim, dtype=self.config.dtype, device=self.config.device)
         score_pol = None
         if keep_scores:
@@ -213,7 +216,7 @@ class SimplexPerturbedMFREINFORCE:
                 M_t.detach(),
                 states[:, t],
                 actions[:, t],
-                centered_returns,
+                centered_returns[:, t],
                 chunk_size=score_chunk_size,
             ).reshape(param_dim)
             if keep_scores:
@@ -227,10 +230,11 @@ class SimplexPerturbedMFREINFORCE:
                 ).reshape(B, param_dim)
 
         H_path = self.H(q_path)
-        weighted_H = torch.einsum("b,btk->tk", centered_returns, H_path)
+        weighted_H = torch.einsum("bt,btk->tk", centered_returns, H_path)
         perturbation_score_sum = -((1.0 - eps_law) / eps_law) * torch.einsum("tk,tkp->p", weighted_H, D_hat)
         grad_flat = (policy_score_sum + perturbation_score_sum) / B
         grad_hat = self.format_gradient(control, grad_flat)
+        returns = returns_to_go[:, 0]
         diag = {
             "returns": returns,
             "baseline": b0,

@@ -57,6 +57,7 @@ Algorithm names:
 - `finite-adaptive-simplex`
 - `consistent-adaptive-simplex`
 - `continuous-mfreinforce`
+- `continuous-oracle-sensitivity`
 - `reinforce`
 - `exact-gradient`
 - `pathwise-gradient`
@@ -66,6 +67,7 @@ Compatibility rules:
 - Finite-state environments use `simplex`, `logits`, and adaptive simplex variants.
 - `reinforce` is the classical policy-score baseline without mean-field score terms and is available for every benchmark family.
 - Continuous-state environments can use `continuous-mfreinforce`.
+- LQ additionally includes `continuous-oracle-sensitivity`, which uses the same continuous MF-REINFORCE outer estimator with exact sensitivity of the mean-flow signature.
 - `lq` and `portfolio` also support `exact-gradient` oracle training/diagnostics.
 - `cucker-smale` and `kuramoto` also support `pathwise-gradient` training/diagnostics.
 

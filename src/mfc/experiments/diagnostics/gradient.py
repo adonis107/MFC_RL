@@ -48,8 +48,16 @@ def run_gradient_diagnostic(config: Mapping[str, Any]) -> RunResult:
     sample_rows: List[Dict[str, Any]] = []
     coordinate_rows: List[Dict[str, Any]] = []
     covariance_rows: List[Dict[str, Any]] = []
-    oracle, oracle_metadata = oracle_gradient(spec, env, control, train_config, config.get("evaluation", {}), diagnostic, seed)
     for lambda_value in lambdas:
+        oracle, oracle_metadata = oracle_gradient(
+            spec,
+            env,
+            control,
+            train_config,
+            config.get("evaluation", {}),
+            {**diagnostic, "oracle_lambda": lambda_value},
+            seed,
+        )
         local_algorithm_config = dict(algorithm_config)
         if algorithm_name == "logits":
             local_algorithm_config["epsilon"] = lambda_value
@@ -153,7 +161,7 @@ def single_gradient_estimate(
     if algorithm_name == "pathwise-gradient":
         _, grad, _ = pathwise_gradient_step(env, control, algorithm_config, train_config, iteration)  # type: ignore[arg-type]
         return grad.detach().reshape(-1)
-    if algorithm_name == "continuous-mfreinforce":
+    if algorithm_name in {"continuous-mfreinforce", "continuous-oracle-sensitivity"}:
         _, grad, _ = continuous_mfreinforce_gradient_step(
             env,
             algorithm,
@@ -192,10 +200,11 @@ def oracle_gradient(
         value = env.exact_value(theta, mu0, horizon)
         return torch.autograd.grad(value, theta)[0].detach().reshape(-1), {"oracle_kind": "exact_population_ad"}
     if spec.name == "lq":
-        _, grad = env.exact_gradient(control)
-        return grad.detach().reshape(-1), {"oracle_kind": "analytic_exact"}
+        lambda_value = float(diagnostic_config.get("oracle_lambda", evaluation_config.get("lambda", train_config.get("lambda", 0.0))))
+        _, grad = env.exact_gradient(control, lambda_=lambda_value)
+        return grad.detach().reshape(-1), {"oracle_kind": "analytic_exact", "oracle_lambda": lambda_value}
     if spec.name == "portfolio":
-        lambda_value = float(evaluation_config.get("lambda", train_config.get("lambda", 0.0)))
+        lambda_value = float(diagnostic_config.get("oracle_lambda", evaluation_config.get("lambda", train_config.get("lambda", 0.0))))
         _, grad = env.exact_gradient(control, lambda_=lambda_value)
         return grad.detach().reshape(-1), {"oracle_kind": "analytic_exact", "oracle_lambda": lambda_value}
     if spec.family == "pathwise" and isinstance(control, torch.nn.Module) and hasattr(env, "pathwise_gradient"):

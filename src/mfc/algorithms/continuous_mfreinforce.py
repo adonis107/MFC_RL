@@ -62,7 +62,10 @@ class ContinuousTransportMFREINFORCE:
         return min(batch_size, 64)
 
     def perturbation_std(self) -> float:
-        return float(self.algorithm_config.get("perturbation_std", 1.0))
+        configured = self.algorithm_config.get("perturbation_std")
+        if configured is not None:
+            return float(configured)
+        return float(getattr(self.config, "rho", 1.0))
 
     def keep_score_diagnostics(self, keep_score_diagnostics: Optional[bool]) -> bool:
         if keep_score_diagnostics is None:
@@ -161,8 +164,13 @@ class ContinuousTransportMFREINFORCE:
             if t == horizon:
                 break
 
-            z, xi = self._sample_coordinate_noise(n_aux, coord_dim, generator)
-            perturbed_coordinates = coordinates[t].unsqueeze(0) + lambda_value * z
+            perturbed_coordinates, score_factors = self._sample_law_coordinates_and_score(
+                coordinates[t],
+                lambda_value,
+                n_aux,
+                coord_dim,
+                generator,
+            )
             law = self._law_from_coordinates(nominal_data, t, perturbed_coordinates)
             actions, action_means = self._sample_actions(control, t, states, law, extra, generator)
             policy_scores = self._policy_scores(
@@ -175,11 +183,42 @@ class ContinuousTransportMFREINFORCE:
                 extra,
                 chunk_size=self.score_chunk_size(param_dim, n_aux),
             )
-            population_scores = torch.einsum("kd,nk->nd", sensitivity[t], xi) / lambda_value
+            population_scores = torch.einsum("kd,nk->nd", sensitivity[t], score_factors)
             cumulative_score = cumulative_score + policy_scores + population_scores
             states = self._transition(t, states, actions, law, extra, generator)
 
         return sensitivity.detach()
+
+    def oracle_sensitivity(
+        self,
+        control: torch.Tensor | torch.nn.Module,
+        nominal: Mapping[str, Any] | torch.Tensor,
+    ) -> torch.Tensor:
+        """Exact coordinate-flow Jacobian for benchmarks with closed-form moments."""
+        if isinstance(control, torch.nn.Module):
+            raise ValueError("Oracle sensitivity is only implemented for tensor policies.")
+        if self.env_kind not in {"LinearQuadraticMFC", "MeanVariancePortfolioMFC"}:
+            raise ValueError(f"{self.env_kind} does not expose exact coordinate sensitivities.")
+
+        nominal_data = self._as_nominal(nominal)
+        horizon = int(nominal_data.get("horizon", nominal_data["coordinates"].shape[0] - 1))
+        theta = control.detach().clone().requires_grad_(True)
+        if self.env_kind == "LinearQuadraticMFC":
+            coordinates = self.env.exact_moments(theta)[0][: horizon + 1]
+        else:
+            coordinates = self.env.exact_moments(theta, lambda_=0.0)[0][: horizon + 1]
+
+        param_dim = theta.numel()
+        rows = []
+        for t in range(horizon + 1):
+            if t == 0 or not coordinates[t].requires_grad:
+                rows.append(torch.zeros(1, param_dim, dtype=self.config.dtype, device=self.config.device))
+                continue
+            grad = torch.autograd.grad(coordinates[t], theta, retain_graph=True, allow_unused=True)[0]
+            if grad is None:
+                grad = torch.zeros_like(theta)
+            rows.append(grad.reshape(1, -1))
+        return torch.stack(rows).detach()
 
     def gradient_estimate(
         self,
@@ -221,11 +260,16 @@ class ContinuousTransportMFREINFORCE:
 
         stored: list[Dict[str, Any]] = []
         for t in range(horizon):
-            z, xi = self._sample_coordinate_noise(B, coord_dim, generator)
-            perturbed_coordinates = coordinates[t].unsqueeze(0) + lambda_value * z
+            perturbed_coordinates, score_factors = self._sample_law_coordinates_and_score(
+                coordinates[t],
+                lambda_value,
+                B,
+                coord_dim,
+                generator,
+            )
             law = self._law_from_coordinates(nominal_data, t, perturbed_coordinates)
             actions, action_means = self._sample_actions(control, t, states, law, extra, generator)
-            population_scores[:, t] = torch.einsum("kd,bk->bd", sensitivity[t], xi) / lambda_value
+            population_scores[:, t] = torch.einsum("kd,bk->bd", sensitivity[t], score_factors)
             stage_signals[:, t] = self._running_signal(t, states, actions, law)
             stored.append(
                 {
@@ -239,10 +283,15 @@ class ContinuousTransportMFREINFORCE:
             )
             states = self._transition(t, states, actions, law, extra, generator)
 
-        z_terminal, xi_terminal = self._sample_coordinate_noise(B, coord_dim, generator)
-        terminal_coordinates = coordinates[horizon].unsqueeze(0) + lambda_value * z_terminal
+        terminal_coordinates, terminal_score_factors = self._sample_law_coordinates_and_score(
+            coordinates[horizon],
+            lambda_value,
+            B,
+            coord_dim,
+            generator,
+        )
         terminal_law = self._law_from_coordinates(nominal_data, horizon, terminal_coordinates)
-        population_scores[:, horizon] = torch.einsum("kd,bk->bd", sensitivity[horizon], xi_terminal) / lambda_value
+        population_scores[:, horizon] = torch.einsum("kd,bk->bd", sensitivity[horizon], terminal_score_factors)
         terminal_signal = self._terminal_signal(states, terminal_law)
 
         returns_to_go = torch.zeros(B, horizon + 1, dtype=self.config.dtype, device=self.config.device)
@@ -322,14 +371,19 @@ class ContinuousTransportMFREINFORCE:
                 seed=seed,
                 exploration=self.algorithm_config.get("coordinate_exploration"),
             )
-        sensitivity = self.estimate_sensitivity(
-            control,
-            nominal,
-            eta_value,
-            n_aux,
-            seed=None if seed is None else int(seed) + 1_000_003,
-            baseline=sensitivity_baseline,
-        )
+        if self.algorithm_config.get("sensitivity_mode") == "oracle":
+            sensitivity = self.oracle_sensitivity(control, nominal)
+            sensitivity_kind = "oracle"
+        else:
+            sensitivity = self.estimate_sensitivity(
+                control,
+                nominal,
+                eta_value,
+                n_aux,
+                seed=None if seed is None else int(seed) + 1_000_003,
+                baseline=sensitivity_baseline,
+            )
+            sensitivity_kind = "estimated"
         grad_hat, diag = self.gradient_estimate(
             control,
             nominal,
@@ -345,6 +399,7 @@ class ContinuousTransportMFREINFORCE:
         diag["eta"] = torch.tensor(eta_value, dtype=self.config.dtype, device=self.config.device)
         diag["main_trajectories"] = torch.tensor(int(B), device=self.config.device)
         diag["auxiliary_trajectories"] = torch.tensor(int(n_aux), device=self.config.device)
+        diag["sensitivity_kind"] = sensitivity_kind
         if isinstance(nominal, Mapping):
             diag["coordinate_flow"] = nominal["coordinates"].detach()
         return grad_hat, diag
@@ -394,6 +449,48 @@ class ContinuousTransportMFREINFORCE:
             z = std * torch.randn(n, coord_dim, dtype=self.config.dtype, device=self.config.device, generator=generator)
         xi = z / (std**2)
         return z, xi
+
+    def _sample_law_coordinates_and_score(
+        self,
+        coordinate: torch.Tensor,
+        lambda_value: float,
+        n: int,
+        coord_dim: int,
+        generator: Optional[torch.Generator],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._uses_affine_mean_perturbation():
+            if coord_dim != 1:
+                raise ValueError("Affine mean perturbations require one nominal mean coordinate.")
+            std = self.perturbation_std()
+            if std <= 0.0:
+                raise ValueError("perturbation_std/rho must be positive for affine mean perturbations.")
+            mean = torch.as_tensor(coordinate, dtype=self.config.dtype, device=self.config.device).reshape(())
+            zeta = std * torch.randn(n, dtype=self.config.dtype, device=self.config.device, generator=generator)
+            beta = std * torch.randn(n, dtype=self.config.dtype, device=self.config.device, generator=generator)
+            perturbed_mean = (1.0 + lambda_value * zeta) * mean + lambda_value * beta
+
+            variance_factor = mean.square() + 1.0
+            std_factor = torch.sqrt(variance_factor)
+            standardized = (zeta * mean + beta) / (std * std_factor)
+            score_factor = (
+                standardized / (lambda_value * std * std_factor)
+                + mean * (standardized.square() - 1.0) / variance_factor
+            )
+            return perturbed_mean.reshape(n, 1), score_factor.reshape(n, 1)
+
+        z, xi = self._sample_coordinate_noise(n, coord_dim, generator)
+        coordinates = torch.as_tensor(coordinate, dtype=self.config.dtype, device=self.config.device)
+        return coordinates.unsqueeze(0) + lambda_value * z, xi / lambda_value
+
+    def _uses_affine_mean_perturbation(self) -> bool:
+        mode = str(self.algorithm_config.get("law_perturbation", "auto"))
+        if mode == "additive":
+            return False
+        if mode == "affine-mean":
+            return True
+        if mode != "auto":
+            raise ValueError(f"Unknown law_perturbation mode {mode!r}.")
+        return self.env_kind in {"LinearQuadraticMFC", "MeanVariancePortfolioMFC"}
 
     def _law_from_coordinates(self, nominal: Mapping[str, Any], t: int, coordinates: torch.Tensor) -> torch.Tensor:
         coordinates = torch.as_tensor(coordinates, dtype=self.config.dtype, device=self.config.device)

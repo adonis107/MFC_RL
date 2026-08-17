@@ -16,12 +16,13 @@ def _exact_application_outputs(
     seed: int,
 ) -> Dict[str, Any]:
     if env_name == "lq":
-        means, variances = env.exact_moments(control)
+        lambda_value = float(evaluation_config.get("lambda", train_config.get("lambda", 0.0)))
+        means, variances = env.exact_moments(control, lambda_=lambda_value)
         optimal = env.riccati_policy()
-        opt_means, opt_variances = env.exact_moments(optimal)
-        value = -env.exact_cost(control)
-        opt_value = -env.exact_cost(optimal)
-        sample = env.sample_trajectories(control, int(evaluation_config.get("particles", 256)), seed=seed)
+        opt_means, opt_variances = env.exact_moments(optimal, lambda_=lambda_value)
+        value = -env.exact_cost(control, lambda_=lambda_value)
+        opt_value = -env.exact_cost(optimal, lambda_=lambda_value)
+        sample = env.sample_trajectories(control, int(evaluation_config.get("particles", 256)), seed=seed, lambda_=lambda_value)
         return {
             "time_metrics": _moment_rows(env_name, means, variances, opt_means, opt_variances),
             "policy": _gain_rows(env_name, control, optimal),
@@ -31,6 +32,7 @@ def _exact_application_outputs(
                 "objective": float(value.item()),
                 "optimal_objective": float(opt_value.item()),
                 "objective_gap": float((opt_value - value).item()),
+                "lambda": lambda_value,
             },
         }
 
@@ -108,6 +110,7 @@ def _gain_rows(env_name: str, control: torch.Tensor, optimal: torch.Tensor) -> L
 def _lq_landscape_rows(env: Any, control: torch.Tensor, evaluation_config: Mapping[str, Any]) -> List[Dict[str, Any]]:
     grid_size = int(evaluation_config.get("landscape_grid_size", 21))
     radius = float(evaluation_config.get("landscape_radius", 1.0))
+    lambda_value = float(evaluation_config.get("lambda", 0.0))
     t = int(evaluation_config.get("landscape_time", 0))
     t = max(0, min(t, env.config.T - 1))
     theta = control.detach()
@@ -119,10 +122,11 @@ def _lq_landscape_rows(env: Any, control: torch.Tensor, evaluation_config: Mappi
             candidate = theta.clone()
             candidate[t, 0] = k
             candidate[t, 1] = ell
-            cost, grad = env.exact_gradient(candidate)
+            cost, grad = env.exact_gradient(candidate, lambda_=lambda_value)
             rows.append(
                 {
                     "time": t,
+                    "lambda": lambda_value,
                     "theta0": float(k.item()),
                     "theta1": float(ell.item()),
                     "cost": float(cost.item()),

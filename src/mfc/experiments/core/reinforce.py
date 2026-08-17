@@ -50,7 +50,7 @@ def finite_reinforce_gradient(
     param_dim = control_vector(control).numel()
     states = torch.empty(batch, horizon + 1, dtype=torch.long, device=env.config.device)
     actions = torch.empty(batch, horizon, dtype=torch.long, device=env.config.device)
-    returns = torch.zeros(batch, dtype=env.config.dtype, device=env.config.device)
+    stage_returns = torch.zeros(batch, horizon, dtype=env.config.dtype, device=env.config.device)
 
     states[:, 0] = torch.multinomial(mu0, num_samples=batch, replacement=True)
     for t in range(horizon):
@@ -58,11 +58,14 @@ def finite_reinforce_gradient(
         states_t = states[:, t]
         actions_t = env.sample_actions_batch(control, t, states_t, law)
         actions[:, t] = actions_t
-        returns = returns + _discount(env, t) * env.reward_batch(states_t, law, actions_t)
+        stage_returns[:, t] = _discount(env, t) * env.reward_batch(states_t, law, actions_t)
         states[:, t + 1] = env.sample_next_states_batch(states_t, actions_t, law)
-    returns = returns + _discount(env, horizon) * env.terminal_reward_batch(states[:, horizon], mu_flow[horizon])
+    returns_to_go = torch.zeros(batch, horizon + 1, dtype=env.config.dtype, device=env.config.device)
+    returns_to_go[:, horizon] = _discount(env, horizon) * env.terminal_reward_batch(states[:, horizon], mu_flow[horizon])
+    for t in range(horizon - 1, -1, -1):
+        returns_to_go[:, t] = stage_returns[:, t] + returns_to_go[:, t + 1]
 
-    weights = _center_signal(returns, _baseline(algorithm_config))
+    centered_returns = _center_returns_to_go(returns_to_go, _baseline(algorithm_config))
     grad_flat = torch.zeros(param_dim, dtype=env.config.dtype, device=env.config.device)
     for t in range(horizon):
         grad_flat = grad_flat + _weighted_policy_score_sums(
@@ -72,9 +75,10 @@ def finite_reinforce_gradient(
             mu_flow[t],
             states[:, t],
             actions[:, t],
-            weights,
+            centered_returns[:, t],
         )
     grad_flat = grad_flat / batch
+    returns = returns_to_go[:, 0]
     objective = returns.mean()
     return objective, _format_gradient(control, grad_flat), _diag(objective, grad_flat, returns, objective_kind="reward")
 
@@ -206,6 +210,14 @@ def _center_signal(signal: torch.Tensor, baseline: Baseline) -> torch.Tensor:
     if baseline is None:
         return signal
     return signal - torch.as_tensor(float(baseline), dtype=signal.dtype, device=signal.device)
+
+
+def _center_returns_to_go(returns_to_go: torch.Tensor, baseline: Baseline) -> torch.Tensor:
+    if baseline == "batch_mean":
+        return returns_to_go - returns_to_go[:, 0].mean()
+    if baseline is None:
+        return returns_to_go
+    return returns_to_go - torch.as_tensor(float(baseline), dtype=returns_to_go.dtype, device=returns_to_go.device)
 
 
 def _discount(env: Any, t: int) -> float:

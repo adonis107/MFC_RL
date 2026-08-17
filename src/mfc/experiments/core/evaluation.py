@@ -38,12 +38,15 @@ def evaluate_control(
     if spec.family == "finite":
         return evaluate_finite(spec, env, control, train_config, evaluation_config)
     if spec.name == "lq":
+        lambda_value = float(evaluation_config.get("lambda", train_config.get("lambda", 0.0)))
         with torch.no_grad():
-            cost = env.exact_cost(control)
+            cost = env.exact_cost(control, lambda_=lambda_value)
             metrics: Dict[str, Any] = {"objective": float(cost.item()), "cost": float(cost.item())}
+            if lambda_value:
+                metrics["lambda"] = lambda_value
             if hasattr(env, "riccati_policy"):
                 optimal = env.riccati_policy()
-                optimal_cost = env.exact_cost(optimal)
+                optimal_cost = env.exact_cost(optimal, lambda_=lambda_value)
                 metrics["optimal_cost"] = float(optimal_cost.item())
                 metrics["objective_gap"] = float((cost - optimal_cost).item())
             return metrics

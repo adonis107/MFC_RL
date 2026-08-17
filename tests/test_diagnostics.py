@@ -3,8 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
+import torch
 
 from helpers import read_csv_rows, tiny_twostate_config
+from mfc.environments import LQConfig, LinearQuadraticMFC
 from mfc.experiments import notebook_helpers as nh
 from mfc.experiments.runner import (
     run_functional_law_diagnostic,
@@ -98,6 +100,32 @@ def test_continuous_mfreinforce_diagnostics_write_csv(tmp_path: Path) -> None:
     assert sensitivity.diagnostics_path is not None and read_csv_rows(sensitivity.diagnostics_path)
     assert score.diagnostics_path is not None and read_csv_rows(score.diagnostics_path)
     assert (score.run_dir / "score_coordinates.csv").exists()
+
+
+def test_lq_perturbed_oracle_is_lambda_aware(tmp_path: Path) -> None:
+    env = LinearQuadraticMFC(LQConfig(device=torch.device("cpu"), dtype=torch.float64, T=2))
+    theta = env.zero_policy()
+    cost0, grad0 = env.exact_gradient(theta, lambda_=0.0)
+    cost1, grad1 = env.exact_gradient(theta, lambda_=0.2)
+
+    assert cost1 > cost0
+    assert not torch.allclose(grad0, grad1)
+
+    result = run_gradient_diagnostic(
+        {
+            "env": "lq",
+            "algorithm": "exact-gradient",
+            "env_config": {"device": "cpu", "dtype": "float64", "T": 2},
+            "algorithm_config": {},
+            "train": {"output_dir": str(tmp_path), "run_name": "lq_lambda_oracle", "seed": 31},
+            "diagnostic": {"replications": 1, "lambdas": [0.2]},
+        }
+    )
+
+    row = read_csv_rows(result.diagnostics_path)[0]
+    assert row["oracle_kind"] == "analytic_exact"
+    assert float(row["oracle_lambda"]) == 0.2
+    assert float(row["mse"]) == 0.0
 
 
 def test_pathwise_gradient_diagnostic_reports_reference_oracle(tmp_path: Path) -> None:

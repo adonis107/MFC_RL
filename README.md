@@ -7,7 +7,7 @@ notebook workflows.
 ## Layout
 
 - `src/mfc/environments/`: benchmark environments.
-- `src/mfc/algorithms/`: simplex, logits, adaptive, exact/pathwise, classical REINFORCE baseline, and continuous MF-REINFORCE algorithms.
+- `src/mfc/algorithms/`: simplex, logits, adaptive, exact/pathwise, classical REINFORCE baseline, continuous MF-REINFORCE, and oracle-sensitivity comparator logic.
 - `src/mfc/experiments/`: modular experiment runner, diagnostics, studies, application artifact writers, and notebook helpers.
 - `notebooks/`: one benchmark notebook per environment plus the experiment gap analysis.
 - `scripts/`: suite-level commands for smoke/full benchmark generation and coverage checks.

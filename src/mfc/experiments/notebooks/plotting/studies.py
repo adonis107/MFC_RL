@@ -97,11 +97,44 @@ def plot_budget_pareto(studies: Mapping[str, pd.DataFrame], grid_metrics: Mappin
 
 
 def plot_extended_study_summaries(studies: Mapping[str, pd.DataFrame], grid_metrics: Mapping[str, pd.DataFrame]) -> None:
+    plot_lambda_training_comparison(studies)
     plot_optimizer_bias_summary(studies)
     plot_robustness_summary(studies)
     plot_adaptive_lambda_summary(studies, grid_metrics)
     plot_ablation_and_signature_summary(studies, grid_metrics)
     plot_particle_and_scaling_summary(studies, grid_metrics)
+
+
+
+def plot_lambda_training_comparison(studies: Mapping[str, pd.DataFrame]) -> None:
+    history = studies.get("lambda_training_optimization_history", pd.DataFrame())
+    if history.empty:
+        return
+    history = history.copy()
+    if "episode" not in history:
+        return
+    history["episode"] = pd.to_numeric(history["episode"], errors="coerce")
+    reward = _validation_reward_series(history)
+    if reward is None:
+        return
+    history["validation_reward"] = reward
+    history = history.dropna(subset=["episode", "validation_reward"])
+    if history.empty:
+        return
+    label_col = "variant" if "variant" in history else "run" if "run" in history else None
+    if label_col is None:
+        history["variant"] = "run"
+        label_col = "variant"
+
+    fig, ax = plt.subplots(figsize=(10, 4.5))
+    for label, subset in history.groupby(label_col):
+        grouped = subset.groupby("episode", as_index=False)["validation_reward"].mean()
+        ax.plot(grouped["episode"], grouped["validation_reward"], marker="o", label=_lambda_variant_label(str(label)))
+    ax.set_title("Validation reward vs training step by perturbation level")
+    ax.set_xlabel("training episode $k$")
+    ax.set_ylabel("mean validation reward $-J(\\theta_k)$ for LQ")
+    ax.legend(fontsize="small", ncols=2)
+    fig.tight_layout()
 
 
 
@@ -223,6 +256,29 @@ def _preferred_study_metric(frame: pd.DataFrame) -> str | None:
         if column in frame and frame[column].notna().any():
             return column
     return None
+
+
+
+def _validation_reward_series(frame: pd.DataFrame) -> pd.Series | None:
+    if "value" in frame and pd.to_numeric(frame["value"], errors="coerce").notna().any():
+        return pd.to_numeric(frame["value"], errors="coerce")
+    if "cost" in frame and pd.to_numeric(frame["cost"], errors="coerce").notna().any():
+        return -pd.to_numeric(frame["cost"], errors="coerce")
+    if "objective" in frame and pd.to_numeric(frame["objective"], errors="coerce").notna().any():
+        return -pd.to_numeric(frame["objective"], errors="coerce")
+    return None
+
+
+
+def _lambda_variant_label(label: str) -> str:
+    match = re.search(r"lambda_([0-9.]+)", label)
+    if label.startswith("mf_lambda_") and match:
+        return f"MF-REINFORCE $\\lambda={match.group(1)}$"
+    if label.startswith("oracle_sens_lambda_") and match:
+        return f"oracle sensitivity $\\lambda={match.group(1)}$"
+    if label == "exact_gradient":
+        return "exact gradient oracle"
+    return label.replace("_", " ")
 
 
 
@@ -478,6 +534,7 @@ __all__ = [
     "plot_budget_and_horizon",
     "plot_budget_pareto",
     "plot_extended_study_summaries",
+    "plot_lambda_training_comparison",
     "plot_optimization_history",
     "plot_optimization_summary",
 ]

@@ -14,7 +14,7 @@ from mfc.algorithms import (
     SimplexPerturbedMFREINFORCE,
 )
 
-from .registry import EXACT_ALGORITHMS, PATHWISE_ALGORITHMS, EnvironmentSpec
+from .registry import CONTINUOUS_ALGORITHMS, EXACT_ALGORITHMS, PATHWISE_ALGORITHMS, EnvironmentSpec
 from .runtime import _aux_batch, _baseline, _eta_value, _lambda_value, _main_batch, _training_horizon
 
 
@@ -28,7 +28,9 @@ def make_algorithm(algorithm_name: str, env: Any, algorithm_config: Optional[Map
         return FiniteBudgetAdaptiveSimplexMFREINFORCE(env, _controller_config(algorithm_config))
     if algorithm_name == "consistent-adaptive-simplex":
         return ConsistentAdaptiveSimplexMFREINFORCE(env, _controller_config(algorithm_config))
-    if algorithm_name == "continuous-mfreinforce":
+    if algorithm_name in CONTINUOUS_ALGORITHMS:
+        if algorithm_name == "continuous-oracle-sensitivity":
+            algorithm_config.setdefault("sensitivity_mode", "oracle")
         return ContinuousTransportMFREINFORCE(env, algorithm_config)
     if algorithm_name in EXACT_ALGORITHMS | PATHWISE_ALGORITHMS or algorithm_name == "reinforce":
         return None
@@ -91,8 +93,9 @@ def exact_gradient_step(
     algorithm_config: Mapping[str, Any],
 ) -> tuple[torch.Tensor, torch.Tensor, Dict[str, Any]]:
     if spec.name == "lq":
-        objective, grad = env.exact_gradient(control)
-        return objective, grad, {"objective": objective, "grad_norm": torch.linalg.norm(grad)}
+        lambda_value = float(algorithm_config.get("lambda", algorithm_config.get("lambda_", 0.0)))
+        objective, grad = env.exact_gradient(control, lambda_=lambda_value)
+        return objective, grad, {"objective": objective, "grad_norm": torch.linalg.norm(grad), "lambda": lambda_value}
     if spec.name == "portfolio":
         lambda_value = float(algorithm_config.get("lambda", algorithm_config.get("lambda_", 0.0)))
         objective, grad = env.exact_gradient(control, lambda_=lambda_value)

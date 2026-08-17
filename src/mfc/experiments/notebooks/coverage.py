@@ -152,7 +152,13 @@ def _section_for_family(key: str, env_name: str) -> str:
 
 
 def _application_helper_name(env_name: str) -> str:
-    return "plot_discrete_application_details" if env_name in DISCRETE_BENCHMARKS else "plot_continuous_application_details"
+    if env_name in DISCRETE_BENCHMARKS:
+        return "plot_discrete_main_results, plot_discrete_application_details"
+    if env_name == "lq":
+        return "plot_lq_main_results, plot_continuous_application_details"
+    if env_name == "portfolio":
+        return "plot_portfolio_main_results, plot_continuous_application_details"
+    return "plot_pathwise_main_results, plot_continuous_application_details"
 
 
 

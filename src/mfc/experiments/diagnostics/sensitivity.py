@@ -76,8 +76,8 @@ def run_sensitivity_diagnostic(config: Mapping[str, Any]) -> RunResult:
             extra_tables={"sensitivity_samples.csv": sample_rows},
         )
 
-    if algorithm_name != "continuous-mfreinforce":
-        raise ValueError("Continuous sensitivity diagnostics require algorithm='continuous-mfreinforce'.")
+    if algorithm_name not in {"continuous-mfreinforce", "continuous-oracle-sensitivity"}:
+        raise ValueError("Continuous sensitivity diagnostics require a continuous MF-REINFORCE algorithm.")
 
     algorithm = ContinuousTransportMFREINFORCE(env, algorithm_config)
     population_particles = int(

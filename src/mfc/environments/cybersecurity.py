@@ -29,6 +29,7 @@ class CybersecurityConfig:
     gamma: float = 0.5
     T_train: int = 3
     T_val: int = 50
+    time_normalization_horizon: int | None = None
     n_states: int = 4
     n_actions: int = 2
     hidden_units: int = 32
@@ -47,6 +48,15 @@ class CybersecurityConfig:
     training_runs: int = 5 # Number of independent training runs for each epsilon value
     validate_every: int = 10 # Freeze the policy and sample a validation episode, for which we compute the population reward starting from a fixed initial distribution
     keep_score_diagnostics: bool = False # Store full per-sample score tensors for debugging; expensive for neural policies.
+
+    def __post_init__(self) -> None:
+        if self.T_train <= 0 or self.T_val <= 0:
+            raise ValueError("T_train and T_val must be positive.")
+        if self.time_normalization_horizon is None:
+            # Keep the short-train/long-validation convention explicit.
+            self.time_normalization_horizon = self.T_val
+        if self.time_normalization_horizon <= 0:
+            raise ValueError("time_normalization_horizon must be positive.")
 
 
 # Environment
@@ -67,7 +77,7 @@ class CybersecurityPolicy(torch.nn.Module):
         mu_in = mu.unsqueeze(0) if single else mu
         time = torch.full(
             (*mu_in.shape[:-1], 1),
-            t / max(1, self.config.T_val),
+            t / max(1, self.config.time_normalization_horizon),
             dtype=mu.dtype,
             device=mu.device,
         )
@@ -317,6 +327,6 @@ class CybersecurityMFC:
             weights,
             self.n_states,
             self.n_actions,
-            self.config.T_val,
+            self.config.time_normalization_horizon,
             chunk_size=chunk_size,
         )

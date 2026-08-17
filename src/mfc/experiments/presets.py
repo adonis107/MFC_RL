@@ -62,16 +62,7 @@ MAIN_TRAIN_STEPS: Dict[str, int] = {
 
 SMOKE_TRAIN_STEPS = {env_name: 4 for env_name in MAIN_TRAIN_STEPS}
 
-MID_TRAIN_STEPS: Dict[str, int] = {
-    "twostate": 100,
-    "advertising": 80,
-    "cybersecurity": 80,
-    "distribution-planning": 80,
-    "lq": 100,
-    "portfolio": 100,
-    "cucker-smale": 40,
-    "kuramoto": 40,
-}
+MID_TRAIN_STEPS = {env_name: 1_000 for env_name in MAIN_TRAIN_STEPS}
 
 MAIN_BATCHES: Dict[str, tuple[int, int]] = {
     "twostate": (256, 16),
@@ -100,7 +91,7 @@ MID_BATCHES: Dict[str, tuple[int, int]] = {
     "advertising": (32, 4),
     "cybersecurity": (32, 4),
     "distribution-planning": (32, 4),
-    "lq": (64, 8),
+    "lq": (64, 64),
     "portfolio": (64, 8),
     "cucker-smale": (24, 4),
     "kuramoto": (24, 4),

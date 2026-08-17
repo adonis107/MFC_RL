@@ -19,6 +19,10 @@ def test_paper_presets_capture_final_budget_choices(tmp_path: Path) -> None:
     assert lq["train"]["B"] == 512
     assert lq["train"]["n"] == 32
     assert lq["env_config"]["T"] == 20
+    assert lq["env_config"]["c"] == 0.60
+    assert lq["env_config"]["gamma"] == 2.0
+    assert "continuous-oracle-sensitivity" in nh.continuous_algorithms_for_env("lq")
+    assert "exact-gradient" in nh.continuous_algorithms_for_env("lq")
     assert lq["diagnostic"]["lambdas"][-1] == 0.8
 
     smoke = nh.benchmark_config("advertising", "simplex", tmp_path, "adv_smoke", preset="smoke")
@@ -37,16 +41,22 @@ def test_mid_preset_is_laptop_scale_but_full_shape(tmp_path: Path) -> None:
     assert presets.diagnostic_config("mid")["samples"] == 96
     assert len(presets.budget_variants("mid")) == 4
     assert presets.signature_dims("mid") == [1, 2, 4]
+    assert all(presets.train_steps(env_name, "mid") == 1_000 for env_name in presets.MAIN_TRAIN_STEPS)
+
+    lq = nh.continuous_benchmark_config("lq", tmp_path, "lq_mid", preset="mid")
+    assert lq["train"]["steps"] == 1_000
+    assert lq["train"]["B"] == 64
+    assert lq["train"]["n"] == 64
 
     advertising = nh.benchmark_config("advertising", "simplex", tmp_path, "adv_mid", preset="mid")
-    assert advertising["train"]["steps"] == 80
+    assert advertising["train"]["steps"] == 1_000
     assert advertising["train"]["B"] == 32
     assert advertising["train"]["n"] == 4
     assert advertising["env_config"]["T"] == 10
     assert advertising["evaluation"]["oracle_grid_size"] == 101
 
     cucker = nh.continuous_benchmark_config("cucker-smale", tmp_path, "cs_mid", preset="mid")
-    assert cucker["train"]["steps"] == 40
+    assert cucker["train"]["steps"] == 1_000
     assert cucker["train"]["B"] == 24
     assert cucker["train"]["n"] == 4
     assert cucker["env_config"]["T"] == 20

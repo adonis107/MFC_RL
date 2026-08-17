@@ -11,6 +11,7 @@ DISCRETE_BENCHMARKS = ["twostate", "advertising", "cybersecurity", "distribution
 CONTINUOUS_BENCHMARKS = ["lq", "portfolio", "cucker-smale", "kuramoto"]
 ALGORITHMS = ["simplex", "logits", "reinforce"]
 CONTINUOUS_ALGORITHM = "continuous-mfreinforce"
+CONTINUOUS_ORACLE_SENSITIVITY_ALGORITHM = "continuous-oracle-sensitivity"
 CONTINUOUS_ALGORITHMS = [CONTINUOUS_ALGORITHM, "reinforce"]
 DEFAULT_DEVICE = _REGISTRY_DEFAULT_DEVICE
 
@@ -139,8 +140,9 @@ def continuous_benchmark_config(
 ) -> Dict[str, Any]:
     if env_name not in CONTINUOUS_BENCHMARKS:
         raise ValueError(f"Expected one of {CONTINUOUS_BENCHMARKS}, got {env_name!r}.")
-    if algorithm not in CONTINUOUS_ALGORITHMS:
-        raise ValueError(f"Expected one of {CONTINUOUS_ALGORITHMS}, got {algorithm!r}.")
+    allowed_algorithms = continuous_algorithms_for_env(env_name)
+    if algorithm not in allowed_algorithms:
+        raise ValueError(f"Expected one of {allowed_algorithms}, got {algorithm!r}.")
 
     preset_name = experiment_presets.resolve_preset(preset, quick=quick)
     B, n = experiment_presets.batch_sizes(env_name, preset_name)
@@ -153,7 +155,7 @@ def continuous_benchmark_config(
         "env": env_name,
         "algorithm": algorithm,
         "env_config": {"device": DEFAULT_DEVICE, "dtype": "float64", "T": horizon},
-        "algorithm_config": {"lambda": 0.1, "eta": 0.1} if algorithm == CONTINUOUS_ALGORITHM else {"baseline": "batch_mean"},
+        "algorithm_config": _continuous_algorithm_config(algorithm),
         "train": {
             "output_dir": str(output_dir),
             "run_name": run_name,
@@ -169,7 +171,9 @@ def continuous_benchmark_config(
         "diagnostic": diagnostic,
     }
 
-    if env_name == "portfolio":
+    if env_name == "lq":
+        config["env_config"].update({"c": 0.60, "gamma": 2.0, "gamma_T": 3.0})
+    elif env_name == "portfolio":
         config["env_config"].update({"return_distribution": "normal"})
     elif env_name == "cucker-smale":
         config["env_config"].update({"hidden_units": hidden, "N_pop": population_particles, "N_val": validation_particles})
@@ -186,6 +190,26 @@ def continuous_benchmark_config(
         config["diagnostic"].update(_pathwise_oracle_defaults(population_particles, preset_name))
         config["evaluation"].update(_continuous_reference_defaults(env_name, validation_particles, preset_name))
     return config
+
+
+
+def continuous_algorithms_for_env(env_name: str) -> list[str]:
+    if env_name == "lq":
+        return [CONTINUOUS_ALGORITHM, CONTINUOUS_ORACLE_SENSITIVITY_ALGORITHM, "reinforce", "exact-gradient"]
+    if env_name == "portfolio":
+        return [CONTINUOUS_ALGORITHM, "reinforce", "exact-gradient"]
+    return [CONTINUOUS_ALGORITHM, "reinforce"]
+
+
+
+def _continuous_algorithm_config(algorithm: str) -> Dict[str, Any]:
+    if algorithm == CONTINUOUS_ALGORITHM:
+        return {"lambda": 0.1, "eta": 0.1}
+    if algorithm == CONTINUOUS_ORACLE_SENSITIVITY_ALGORITHM:
+        return {"lambda": 0.1, "eta": 0.1, "sensitivity_mode": "oracle"}
+    if algorithm == "reinforce":
+        return {"baseline": "batch_mean"}
+    return {}
 
 
 
@@ -251,10 +275,12 @@ __all__ = [
     "ALGORITHMS",
     "CONTINUOUS_ALGORITHM",
     "CONTINUOUS_ALGORITHMS",
+    "CONTINUOUS_ORACLE_SENSITIVITY_ALGORITHM",
     "CONTINUOUS_BENCHMARKS",
     "DEFAULT_DEVICE",
     "DISCRETE_BENCHMARKS",
     "benchmark_config",
+    "continuous_algorithms_for_env",
     "continuous_benchmark_config",
     "set_default_device",
 ]

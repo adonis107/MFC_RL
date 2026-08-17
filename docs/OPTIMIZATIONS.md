@@ -61,6 +61,8 @@ Legend:
 | Weighted continuous policy score sums | `_weighted_policy_score_sums` | Build every per-sample neural score vector first | Reduces memory and AD calls | **No result change**, except roundoff |
 | Separate seeds for nominal flow, sensitivity, and main gradient | `complete_gradient_estimate` | Reuse the same seed stream for all sub-estimators | Avoids accidental coupling between sub-estimators while preserving reproducibility | **Distributionally unchanged**, but exact seeded trajectories differ |
 | Benchmark-specific law reconstruction from coordinates | `_law_from_coordinates` | Keep an abstract random measure object | Makes the transport perturbation executable for each environment | **No change for the implemented chart**; results are tied to that chart |
+| Oracle coordinate sensitivity for LQ comparator | `continuous_mfreinforce.py`, `experiments/core/gradient_steps.py` | Estimate the mean-flow sensitivity with auxiliary trajectories | Isolates the outer continuous MF-REINFORCE score estimator from sensitivity-estimation noise | **Deliberate oracle/comparator mode**. It changes the estimator by replacing the auxiliary sensitivity estimator with the exact Jacobian |
+| Stronger LQ mean-field benchmark config | `experiments/notebooks/configs.py` | Use weak coupling `c=0.1`, `gamma=0.4`, `gamma_T=0.6` | Makes LQ test the mean-field correction rather than mostly the state-feedback term | **Deliberate benchmark change**. It changes the environment used by generated benchmark bundles |
 
 ## Environment-Level Optimizations
 
@@ -106,7 +108,7 @@ optimizations:
 
 1. `flow_mode=exact` versus `flow_mode=particle` for finite-state algorithms.
    Exact mode uses model knowledge and removes particle-flow noise.
-2. `exact-gradient` and `pathwise-gradient` are oracle/comparator modes, not
+2. `exact-gradient`, `pathwise-gradient`, and `continuous-oracle-sensitivity` are oracle/comparator modes, not
    MF-REINFORCE estimators.
 3. Adaptive simplex algorithms change `lambda`, sometimes `eta`, and sometimes
    sample sizes over training.

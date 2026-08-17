@@ -141,7 +141,7 @@ def run_train(config: Mapping[str, Any]) -> RunResult:
         elif algorithm_name == "pathwise-gradient":
             objective, grad, diag = pathwise_gradient_step(env, control, algorithm_config, train_config, episode)  # type: ignore[arg-type]
             assign_gradient(control, grad, spec.objective)
-        elif algorithm_name == "continuous-mfreinforce":
+        elif algorithm_name in CONTINUOUS_ALGORITHMS:
             objective, grad, diag = continuous_mfreinforce_gradient_step(
                 env,
                 algorithm,

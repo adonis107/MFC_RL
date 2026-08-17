@@ -876,9 +876,10 @@ class KuramotoMFC:
         lambda_value: float,
     ) -> torch.Tensor:
         if lambda_value == 0.0 or self.config.rho == 0.0:
-            return phases
+            return self.wrap_phases(phases)
         beta0, beta_c, beta_s = perturbation.unbind(dim=-1)
-        return phases + lambda_value * (beta0 + beta_c * torch.cos(phases) + beta_s * torch.sin(phases))
+        transported = phases + lambda_value * (beta0 + beta_c * torch.cos(phases) + beta_s * torch.sin(phases))
+        return self.wrap_phases(transported)
 
     def _broadcast_stat(self, stat: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         while stat.ndim < target.ndim:

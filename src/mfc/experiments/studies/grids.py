@@ -216,6 +216,7 @@ def run_variant_grid(
 
     metrics_rows: List[Dict[str, Any]] = []
     diagnostic_rows: List[Dict[str, Any]] = []
+    history_rows: List[Dict[str, Any]] = []
     for index, variant in enumerate(variants):
         variant = dict(variant)
         label = str(variant.pop("label", f"variant_{index:04d}"))
@@ -240,6 +241,8 @@ def run_variant_grid(
         row["simulator_budget_proxy"] = _simulator_budget_proxy(child)
         row["peak_cuda_memory_bytes"] = _peak_memory_if_available()
         metrics_rows.append(row)
+        for history_row in result.history:
+            history_rows.append({"variant": label, **variant, **history_row})
         if result.diagnostics_path and Path(result.diagnostics_path).exists():
             for diagnostic_row in _read_csv(result.diagnostics_path):
                 diagnostic_rows.append({"variant": label, **variant, **diagnostic_row})
@@ -247,7 +250,9 @@ def run_variant_grid(
 
     _write_csv(run_dir / "grid_metrics.csv", metrics_rows)
     _write_csv(run_dir / "diagnostics.csv", diagnostic_rows if diagnostic_rows else metrics_rows)
-    metrics = {"variants": len(metrics_rows), "diagnostic_rows": len(diagnostic_rows), "command": command}
+    if history_rows:
+        _write_csv(run_dir / "optimization_history.csv", history_rows)
+    metrics = {"variants": len(metrics_rows), "diagnostic_rows": len(diagnostic_rows), "history_rows": len(history_rows), "command": command}
     _write_json(run_dir / "metrics.json", metrics)
     return RunResult(run_dir, dict(config), metrics, [], diagnostics_path=run_dir / "diagnostics.csv")
 

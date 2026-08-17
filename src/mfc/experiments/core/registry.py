@@ -38,7 +38,7 @@ FINITE_ALGORITHMS = {
 }
 EXACT_ALGORITHMS = {"exact-gradient"}
 PATHWISE_ALGORITHMS = {"pathwise-gradient"}
-CONTINUOUS_ALGORITHMS = {"continuous-mfreinforce"}
+CONTINUOUS_ALGORITHMS = {"continuous-mfreinforce", "continuous-oracle-sensitivity"}
 BASELINE_ALGORITHMS = {"reinforce"}
 DEFAULT_DEVICE = "cuda"
 
@@ -110,6 +110,8 @@ def validate_compatibility(env_name: str, algorithm_name: str) -> None:
         raise ValueError(f"{algorithm_name!r} requires an exact-gradient environment, got {env_name!r}.")
     if algorithm_name in PATHWISE_ALGORITHMS and spec.family != "pathwise":
         raise ValueError(f"{algorithm_name!r} requires a pathwise-gradient environment, got {env_name!r}.")
+    if algorithm_name == "continuous-oracle-sensitivity" and spec.name not in {"lq", "portfolio"}:
+        raise ValueError(f"{algorithm_name!r} requires an exact moment environment, got {env_name!r}.")
     if algorithm_name in CONTINUOUS_ALGORITHMS and spec.family == "finite":
         raise ValueError(f"{algorithm_name!r} requires a continuous-state environment, got {env_name!r}.")
     if algorithm_name not in FINITE_ALGORITHMS | EXACT_ALGORITHMS | PATHWISE_ALGORITHMS | CONTINUOUS_ALGORITHMS | BASELINE_ALGORITHMS:

@@ -168,6 +168,30 @@ def test_train_lq_continuous_mfreinforce(tmp_path: Path) -> None:
     assert "objective_gap" in result.metrics
 
 
+def test_train_lq_continuous_oracle_sensitivity(tmp_path: Path) -> None:
+    result = run_train(
+        {
+            "env": "lq",
+            "algorithm": "continuous-oracle-sensitivity",
+            "env_config": {"device": "cpu", "dtype": "float64", "T": 2, "c": 0.6, "gamma": 2.0, "gamma_T": 3.0},
+            "algorithm_config": {"lambda": 0.1, "eta": 0.1, "sensitivity_mode": "oracle"},
+            "train": {
+                "output_dir": str(tmp_path),
+                "run_name": "lq_oracle_sensitivity",
+                "seed": 31,
+                "steps": 1,
+                "lr": 1e-3,
+                "B": 4,
+                "n": 1,
+                "validate_every": 1,
+            },
+        }
+    )
+
+    assert result.checkpoint_path is not None and result.checkpoint_path.exists()
+    assert "objective_gap" in result.metrics
+
+
 def test_train_cucker_smale_continuous_mfreinforce(tmp_path: Path) -> None:
     result = run_train(
         {

@@ -28,7 +28,7 @@ def run_perturbation_bias_study(config: Mapping[str, Any]) -> RunResult:
     control = initialize_control(spec, env)
     rows: List[Dict[str, Any]] = []
 
-    if env_name == "portfolio":
+    if env_name in {"lq", "portfolio"}:
         base_objective = env.exact_objective(control, lambda_=0.0)
         base_grad = env.exact_gradient(control, lambda_=0.0)[1].reshape(-1)
         for lambda_value in lambdas:

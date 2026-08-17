@@ -83,7 +83,14 @@ def perturb_base(spec: EnvironmentSpec, env: Any, algorithm: Any, base: torch.Te
         noise = torch.randn_like(base)
         return env.wrap_phases(base + float(lambda_value) * noise)
     if spec.name in {"lq", "portfolio"}:
-        return base + float(lambda_value) * torch.randn_like(base)
+        mean = base[..., 0]
+        variance = base[..., 1].clamp_min(0.0)
+        rho = float(getattr(env.config, "rho", 1.0))
+        zeta = rho * torch.randn_like(mean)
+        beta = rho * torch.randn_like(mean)
+        perturbed_mean = (1.0 + float(lambda_value) * zeta) * mean + float(lambda_value) * beta
+        perturbed_variance = (1.0 + float(lambda_value) * zeta).square() * variance
+        return torch.stack([perturbed_mean, perturbed_variance], dim=-1)
     raise ValueError(f"Unsupported perturbation for {spec.name!r}.")
 
 

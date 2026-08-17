@@ -25,6 +25,7 @@ from .configs import (
     CONTINUOUS_ALGORITHMS,
     DISCRETE_BENCHMARKS,
     benchmark_config,
+    continuous_algorithms_for_env,
     continuous_benchmark_config,
 )
 
@@ -123,7 +124,8 @@ def ensure_continuous_benchmark_bundle(
     bundle: Dict[str, Any] = {"env": env_name, "base_dir": base_dir, "train": {}, "application": {}, "diagnostics": {}, "studies": {}}
 
     primary_config: Dict[str, Any] | None = None
-    for algorithm in CONTINUOUS_ALGORITHMS:
+    algorithms = continuous_algorithms_for_env(env_name)
+    for algorithm in algorithms:
         train_dir = base_dir / "train" / f"{env_name}_{algorithm}"
         config = continuous_benchmark_config(
             env_name,
@@ -179,6 +181,11 @@ def ensure_continuous_benchmark_bundle(
         env_name, base_dir, bundle, force=force, progress=progress
     )
     release_memory()
+    if env_name == "lq":
+        bundle["studies"]["lambda_training"] = _ensure_lq_lambda_training_study(
+            env_name, base_dir, primary_config, force=force, quick=quick, seed=seed, preset=preset_name, progress=progress
+        )
+        release_memory()
     if extended:
         bundle["studies"].update(
             _ensure_extended_studies(env_name, base_dir, primary_config, bundle, force=force, quick=quick, preset=preset_name, progress=progress)
@@ -221,16 +228,17 @@ def continuous_bundle_paths(env_name: str, base_dir: Path | str) -> Dict[str, An
     return {
         "env": env_name,
         "base_dir": base_dir,
-        "train": {algorithm: base_dir / "train" / f"{env_name}_{algorithm}" for algorithm in CONTINUOUS_ALGORITHMS},
-        "application": {algorithm: base_dir / "application" / f"{env_name}_{algorithm}" for algorithm in CONTINUOUS_ALGORITHMS},
+        "train": {algorithm: base_dir / "train" / f"{env_name}_{algorithm}" for algorithm in continuous_algorithms_for_env(env_name)},
+        "application": {algorithm: base_dir / "application" / f"{env_name}_{algorithm}" for algorithm in continuous_algorithms_for_env(env_name)},
         "diagnostics": {
             algorithm: _continuous_diagnostic_paths(base_dir, env_name, algorithm)
-            for algorithm in CONTINUOUS_ALGORITHMS
+            for algorithm in continuous_algorithms_for_env(env_name)
         },
         "studies": {
             "budget": base_dir / "studies" / "budget_allocation",
             "horizon": base_dir / "studies" / "horizon_scaling",
             "optimization": base_dir / "studies" / "optimization_summary",
+            **({"lambda_training": base_dir / "studies" / "lambda_training"} if env_name == "lq" else {}),
             **_extended_study_paths(base_dir, env_name),
         },
     }
@@ -238,8 +246,13 @@ def continuous_bundle_paths(env_name: str, base_dir: Path | str) -> Dict[str, An
 
 
 def _continuous_diagnostic_paths(base_dir: Path, env_name: str, algorithm: str) -> Dict[str, Path]:
-    if algorithm == "reinforce":
+    if algorithm in {"reinforce", "exact-gradient"}:
         return {"gradient": base_dir / "diagnostics" / f"{env_name}_{algorithm}_gradient"}
+    if algorithm == "continuous-oracle-sensitivity":
+        return {
+            "gradient": base_dir / "diagnostics" / f"{env_name}_{algorithm}_gradient",
+            "score": base_dir / "diagnostics" / f"{env_name}_{algorithm}_score",
+        }
     return {
         "perturbation": base_dir / "diagnostics" / f"{env_name}_{algorithm}_perturbation",
         "functional_law": base_dir / "diagnostics" / f"{env_name}_{algorithm}_functional_law",
@@ -259,8 +272,10 @@ def _ensure_algorithm_diagnostics(
     progress: ProgressCallback | None = None,
 ) -> Dict[str, Path]:
     out: Dict[str, Path] = {}
-    if algorithm == "reinforce":
+    if algorithm in {"reinforce", "exact-gradient"}:
         runners = {"gradient": run_gradient_diagnostic}
+    elif algorithm == "continuous-oracle-sensitivity":
+        runners = {"gradient": run_gradient_diagnostic, "score": run_score_validation}
     else:
         runners = {
             "perturbation": run_perturbation_diagnostic,
@@ -295,8 +310,10 @@ def _ensure_continuous_diagnostics(
     progress: ProgressCallback | None = None,
 ) -> Dict[str, Path]:
     out: Dict[str, Path] = {}
-    if algorithm == "reinforce":
+    if algorithm in {"reinforce", "exact-gradient"}:
         runners = {"gradient": run_gradient_diagnostic}
+    elif algorithm == "continuous-oracle-sensitivity":
+        runners = {"gradient": run_gradient_diagnostic, "score": run_score_validation}
     else:
         runners = {
             "perturbation": run_perturbation_diagnostic,
@@ -487,6 +504,62 @@ def _ensure_continuous_optimization_summary(
         _report(progress, "done", "studies/optimization", run_dir)
     else:
         _report(progress, "skip", "studies/optimization", run_dir)
+    return run_dir
+
+
+
+def _ensure_lq_lambda_training_study(
+    env_name: str,
+    base_dir: Path,
+    config: Mapping[str, Any],
+    *,
+    force: bool,
+    quick: bool,
+    seed: int,
+    preset: str,
+    progress: ProgressCallback | None = None,
+) -> Path:
+    run_dir = base_dir / "studies" / "lambda_training"
+    variants = []
+    for lambda_value in experiment_presets.fixed_lambda_variants(preset):
+        variants.append(
+            {
+                "label": f"mf_lambda_{lambda_value:g}",
+                "algorithm": CONTINUOUS_ALGORITHM,
+                "algorithm_config.lambda": lambda_value,
+                "algorithm_config.eta": lambda_value,
+            }
+        )
+        variants.append(
+            {
+                "label": f"oracle_sens_lambda_{lambda_value:g}",
+                "algorithm": "continuous-oracle-sensitivity",
+                "algorithm_config.lambda": lambda_value,
+                "algorithm_config.eta": lambda_value,
+                "algorithm_config.sensitivity_mode": "oracle",
+            }
+        )
+    variants.extend(
+        [
+            {"label": "reinforce", "algorithm": "reinforce", "algorithm_config.baseline": "batch_mean"},
+            {"label": "exact_gradient", "algorithm": "exact-gradient"},
+        ]
+    )
+    study_config = json.loads(json.dumps(config))
+    study_config["algorithm"] = CONTINUOUS_ALGORITHM
+    study_config.setdefault("train", {})
+    study_config["train"]["output_dir"] = str(base_dir / "studies")
+    study_config["train"]["run_name"] = "lambda_training"
+    study_config["train"]["seed"] = seed
+    study_config["train"]["overwrite"] = True
+    study_config["study"] = {"name": "lambda-training", "command": "train", "variants": variants}
+    if force or not (run_dir / "optimization_history.csv").exists():
+        _report(progress, "run", "studies/lambda_training", run_dir)
+        run_variant_grid(study_config, "lambda-training", variants, default_command="train")
+        release_memory()
+        _report(progress, "done", "studies/lambda_training", run_dir)
+    else:
+        _report(progress, "skip", "studies/lambda_training", run_dir)
     return run_dir
 
 

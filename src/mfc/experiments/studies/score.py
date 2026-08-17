@@ -40,8 +40,8 @@ def run_score_validation(config: Mapping[str, Any]) -> RunResult:
     covariance_rows: List[Dict[str, Any]] = []
 
     if spec.family != "finite":
-        if algorithm_name != "continuous-mfreinforce":
-            raise ValueError("Continuous score validation requires algorithm='continuous-mfreinforce'.")
+        if algorithm_name not in {"continuous-mfreinforce", "continuous-oracle-sensitivity"}:
+            raise ValueError("Continuous score validation requires a continuous MF-REINFORCE algorithm.")
         population_particles = int(
             train_config.get(
                 "population_particles",

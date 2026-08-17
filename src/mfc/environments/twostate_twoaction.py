@@ -68,12 +68,22 @@ class TwoStateMFC:
         Static Bernoulli-logit policy.
 
         The reference parametrization uses one logit per state, with
-        pi(MV|x)=sigmoid(theta_x) and pi(ST|x)=1-sigmoid(theta_x). A legacy
-        2x2 row-softmax tensor is still accepted for saved exploratory runs.
+        pi(MV|x)=sigmoid(theta_x) and pi(ST|x)=1-sigmoid(theta_x).
+
+        A 2x2 tensor is accepted for two legacy/reference use cases:
+        probability matrices, such as optimal_policy(), are used directly,
+        while unconstrained 2x2 tensors are interpreted as row logits.
         """
         if theta.ndim == 1:
             p_move = torch.sigmoid(theta)
             return torch.stack([1.0 - p_move, p_move], dim=-1)
+        if (
+            theta.ndim == 2
+            and theta.shape == (self.n_states, self.n_actions)
+            and bool(torch.all(theta >= 0.0))
+            and bool(torch.allclose(theta.sum(dim=-1), torch.ones(self.n_states, dtype=theta.dtype, device=theta.device)))
+        ):
+            return theta
         return torch.softmax(theta, dim=-1)
 
     def action_probabilities(self, theta: torch.Tensor, t: int, mu: torch.Tensor) -> torch.Tensor:

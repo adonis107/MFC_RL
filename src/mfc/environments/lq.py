@@ -17,6 +17,7 @@ class LQConfig:
     c: float = 0.10
     noise_std: float = 0.20
     policy_std: float = 0.35
+    rho: float = 1.0
 
     q: float = 1.0
     r: float = 0.30
@@ -34,6 +35,8 @@ class LQConfig:
             raise ValueError("policy_std must be positive.")
         if self.noise_std < 0.0:
             raise ValueError("noise_std must be non-negative.")
+        if self.rho < 0.0:
+            raise ValueError("rho must be non-negative.")
         if self.x0_std < 0.0:
             raise ValueError("x0_std must be non-negative.")
         if self.r <= 0.0:
@@ -65,6 +68,12 @@ class LinearQuadraticMFC:
             raise ValueError(f"mean_flow must have shape {expected_shape}, got {tuple(mean_flow.shape)}.")
         return mean_flow
 
+    def _lambda_sq_rho_sq(self, lambda_: float) -> float:
+        lambda_value = float(lambda_)
+        if lambda_value < 0.0:
+            raise ValueError("lambda_ must be non-negative.")
+        return (lambda_value * self.config.rho) ** 2
+
     def zero_policy(self) -> torch.Tensor:
         return torch.zeros((self.config.T, 2), dtype=self.config.dtype, device=self.config.device)
 
@@ -74,9 +83,10 @@ class LinearQuadraticMFC:
         law_mean = torch.as_tensor(law_mean, dtype=theta.dtype, device=theta.device)
         return theta[t, 0] * states + theta[t, 1] * law_mean
 
-    def exact_moments(self, theta: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def exact_moments(self, theta: torch.Tensor, lambda_: float = 0.0) -> tuple[torch.Tensor, torch.Tensor]:
         theta = self._as_theta(theta)
         cfg = self.config
+        lambda_sq_rho_sq = self._lambda_sq_rho_sq(lambda_)
         mean = torch.as_tensor(cfg.x0_mean, dtype=theta.dtype, device=theta.device)
         variance = torch.as_tensor(cfg.x0_std**2, dtype=theta.dtype, device=theta.device)
         means = [mean]
@@ -85,9 +95,11 @@ class LinearQuadraticMFC:
         for t in range(cfg.T):
             mean_factor = cfg.a + cfg.b * theta[t, 0] + cfg.b * theta[t, 1] + cfg.c
             fluctuation_factor = cfg.a + cfg.b * theta[t, 0]
+            perturbed_mean_variance = lambda_sq_rho_sq * (mean.square() + 1.0)
             mean = mean_factor * mean
             variance = (
                 fluctuation_factor.square() * variance
+                + (cfg.b * theta[t, 1] + cfg.c).square() * perturbed_mean_variance
                 + cfg.b**2 * cfg.policy_std**2
                 + cfg.noise_std**2
             )
@@ -96,32 +108,48 @@ class LinearQuadraticMFC:
 
         return torch.stack(means), torch.stack(variances)
 
-    def exact_cost(self, theta: torch.Tensor) -> torch.Tensor:
+    def exact_cost(self, theta: torch.Tensor, lambda_: float = 0.0) -> torch.Tensor:
         theta = self._as_theta(theta)
         cfg = self.config
-        mean, variance = self.exact_moments(theta)
+        lambda_sq_rho_sq = self._lambda_sq_rho_sq(lambda_)
+        mean, variance = self.exact_moments(theta, lambda_=lambda_)
         theta_state = theta[:, 0]
         theta_law = theta[:, 1]
 
         state_second_moment = variance[:-1] + mean[:-1].square()
+        perturbed_mean_variance = lambda_sq_rho_sq * (mean[:-1].square() + 1.0)
         action_second_moment = (
             theta_state.square() * variance[:-1]
             + (theta_state + theta_law).square() * mean[:-1].square()
+            + theta_law.square() * perturbed_mean_variance
             + cfg.policy_std**2
         )
         running = (
             cfg.q * state_second_moment
             + cfg.r * action_second_moment
-            + cfg.gamma * mean[:-1].square()
+            + cfg.gamma * (mean[:-1].square() + perturbed_mean_variance)
         )
-        terminal = cfg.q_T * (variance[-1] + mean[-1].square()) + cfg.gamma_T * mean[-1].square()
+        terminal_perturbed_mean_variance = lambda_sq_rho_sq * (mean[-1].square() + 1.0)
+        terminal = (
+            cfg.q_T * (variance[-1] + mean[-1].square())
+            + cfg.gamma_T * (mean[-1].square() + terminal_perturbed_mean_variance)
+        )
         return running.sum() + terminal
 
-    def exact_gradient(self, theta: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def exact_objective(self, theta: torch.Tensor, lambda_: float = 0.0) -> torch.Tensor:
+        return self.exact_cost(theta, lambda_=lambda_)
+
+    def exact_value(self, theta: torch.Tensor, lambda_: float = 0.0) -> torch.Tensor:
+        return -self.exact_cost(theta, lambda_=lambda_)
+
+    def exact_gradient(self, theta: torch.Tensor, lambda_: float = 0.0) -> tuple[torch.Tensor, torch.Tensor]:
         theta_var = self._as_theta(theta).detach().clone().requires_grad_(True)
-        cost = self.exact_cost(theta_var)
+        cost = self.exact_cost(theta_var, lambda_=lambda_)
         grad = torch.autograd.grad(cost, theta_var)[0]
         return cost.detach(), grad.detach()
+
+    def exact_cost_gradient(self, theta: torch.Tensor, lambda_: float = 0.0) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.exact_gradient(theta, lambda_=lambda_)
 
     def riccati_policy(self) -> torch.Tensor:
         cfg = self.config
@@ -189,6 +217,7 @@ class LinearQuadraticMFC:
         theta: torch.Tensor,
         n: int,
         seed: Optional[int] = None,
+        lambda_: float = 0.0,
         frozen_mean_flow: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         if n <= 0:
@@ -201,7 +230,7 @@ class LinearQuadraticMFC:
             generator.manual_seed(int(seed))
 
         if frozen_mean_flow is None:
-            mean_flow = self.exact_moments(theta)[0].detach()
+            mean_flow = self.exact_moments(theta, lambda_=lambda_)[0].detach()
         else:
             mean_flow = self._as_law_flow(frozen_mean_flow).detach()
 
@@ -210,17 +239,19 @@ class LinearQuadraticMFC:
         action_means = torch.empty((n, cfg.T), dtype=cfg.dtype, device=cfg.device)
         residuals = torch.empty((n, cfg.T), dtype=cfg.dtype, device=cfg.device)
         stage_costs = torch.empty((n, cfg.T), dtype=cfg.dtype, device=cfg.device)
+        perturbed_law_means = torch.empty((n, cfg.T + 1), dtype=cfg.dtype, device=cfg.device)
 
         x = cfg.x0_mean + cfg.x0_std * torch.randn((n,), dtype=cfg.dtype, device=cfg.device, generator=generator)
         states[:, 0] = x
 
         for t in range(cfg.T):
-            law_mean = mean_flow[t]
+            law_mean = self._sample_perturbed_law_mean(mean_flow[t], n, lambda_, generator)
             action_mean = self.policy_mean(theta, t, x, law_mean)
             residual = cfg.policy_std * torch.randn((n,), dtype=cfg.dtype, device=cfg.device, generator=generator)
             action = action_mean + residual
             noise = cfg.noise_std * torch.randn((n,), dtype=cfg.dtype, device=cfg.device, generator=generator)
 
+            perturbed_law_means[:, t] = law_mean
             actions[:, t] = action
             action_means[:, t] = action_mean
             residuals[:, t] = residual
@@ -229,11 +260,14 @@ class LinearQuadraticMFC:
             x = cfg.a * x + cfg.b * action + cfg.c * law_mean + noise
             states[:, t + 1] = x
 
-        terminal_costs = self.terminal_cost_batch(states[:, cfg.T], mean_flow[cfg.T])
+        terminal_law_mean = self._sample_perturbed_law_mean(mean_flow[cfg.T], n, lambda_, generator)
+        perturbed_law_means[:, cfg.T] = terminal_law_mean
+        terminal_costs = self.terminal_cost_batch(states[:, cfg.T], terminal_law_mean)
         law_means = mean_flow.unsqueeze(0).expand(n, cfg.T + 1)
         return {
             "mean_flow": mean_flow,
             "law_means": law_means,
+            "perturbed_law_means": perturbed_law_means,
             "states": states,
             "actions": actions,
             "action_means": action_means,
@@ -241,3 +275,20 @@ class LinearQuadraticMFC:
             "stage_costs": stage_costs,
             "terminal_costs": terminal_costs,
         }
+
+    def _sample_perturbed_law_mean(
+        self,
+        mean: torch.Tensor,
+        n: int,
+        lambda_: float,
+        generator: Optional[torch.Generator],
+    ) -> torch.Tensor:
+        mean = torch.as_tensor(mean, dtype=self.config.dtype, device=self.config.device)
+        lambda_value = float(lambda_)
+        if lambda_value < 0.0:
+            raise ValueError("lambda_ must be non-negative.")
+        if lambda_value == 0.0 or self.config.rho == 0.0:
+            return mean.expand(n)
+        zeta = self.config.rho * torch.randn((n,), dtype=self.config.dtype, device=self.config.device, generator=generator)
+        beta = self.config.rho * torch.randn((n,), dtype=self.config.dtype, device=self.config.device, generator=generator)
+        return (1.0 + lambda_value * zeta) * mean + lambda_value * beta
