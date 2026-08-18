@@ -109,13 +109,15 @@ def gradient_estimate(
     B: int,
     epsilon: float,
     *,
+    gamma: float = 1.0,
     baseline: torch.Tensor | None = None,
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     """
     Plug-in logit-perturbed policy-gradient estimator (Theorem 2.3, eq.
-    2.6), using the shared auxiliary sensitivity estimate `D_hat`. Returns
-    shape (D,).
+    2.6), using the shared auxiliary sensitivity estimate `D_hat`. `gamma=1.0`
+    (default) recovers the undiscounted estimator; see
+    `_common.exact_objective`. Returns shape (D,).
     """
     device, dtype = theta.device, theta.dtype
     N, D = env.n_states, theta.numel()
@@ -142,9 +144,9 @@ def gradient_estimate(
             terminal_reward = env.terminal_reward(states, M)
 
     G = torch.zeros(T + 1, B, dtype=dtype, device=device)
-    G[T] = terminal_reward
+    G[T] = (gamma**T) * terminal_reward
     for t in range(T - 1, -1, -1):
-        G[t] = rewards[t] + G[t + 1]
+        G[t] = (gamma**t) * rewards[t] + G[t + 1]
 
     weighted = Q * (G - baseline.view(-1, 1)).unsqueeze(-1)
     weighted[:T] = weighted[:T] + L * (G[:T] - baseline[:T].view(-1, 1)).unsqueeze(-1)
@@ -161,6 +163,7 @@ def gradient_step(
     n_aux: int,
     B: int,
     epsilon: float,
+    gamma: float = 1.0,
     baseline_G: torch.Tensor | None = None,
     population_flow_fn=exact_population_flow,
     generator: torch.Generator | None = None,
@@ -173,7 +176,7 @@ def gradient_step(
     main batch. Returns shape (D,)."""
     mu_flow = population_flow_fn(env, action_probs_fn, theta, mu0, T, generator=generator)
     D_hat = estimate_logit_sensitivity_flow(env, action_probs_fn, theta, mu_flow, mu0, T, n_aux, epsilon, generator=generator)
-    return gradient_estimate(env, action_probs_fn, theta, mu_flow, mu0, D_hat, T, B, epsilon, baseline=baseline_G, generator=generator)
+    return gradient_estimate(env, action_probs_fn, theta, mu_flow, mu0, D_hat, T, B, epsilon, gamma=gamma, baseline=baseline_G, generator=generator)
 
 
 def train(
@@ -187,6 +190,7 @@ def train(
     n_aux: int,
     B: int,
     epsilon: float,
+    gamma: float = 1.0,
     lr: float = 1e-3,
     baseline_G: torch.Tensor | None = None,
     population_flow_fn=exact_population_flow,
@@ -213,6 +217,7 @@ def train(
             n_aux=n_aux,
             B=B,
             epsilon=epsilon,
+            gamma=gamma,
             baseline_G=baseline_G,
             population_flow_fn=population_flow_fn,
             generator=generator,

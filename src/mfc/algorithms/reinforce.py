@@ -44,6 +44,7 @@ def gradient_estimate(
     T: int,
     B: int,
     *,
+    gamma: float = 1.0,
     baseline: torch.Tensor | None = None,
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
@@ -52,7 +53,8 @@ def gradient_estimate(
     from B trajectories simulated against the given nominal flow `mu_flow`
     (used directly, unperturbed, as the population argument at every step —
     no simplex/logit randomization, since there is no population-sensitivity
-    term to make model-free here). Returns shape (D,).
+    term to make model-free here). `gamma=1.0` (default) recovers the
+    undiscounted estimator; see `_common.exact_objective`. Returns shape (D,).
     """
     device, dtype = theta.device, theta.dtype
     N, D = env.n_states, theta.numel()
@@ -74,9 +76,9 @@ def gradient_estimate(
             terminal_reward = env.terminal_reward(states, mu_t)
 
     G = torch.zeros(T + 1, B, dtype=dtype, device=device)
-    G[T] = terminal_reward
+    G[T] = (gamma**T) * terminal_reward
     for t in range(T - 1, -1, -1):
-        G[t] = rewards[t] + G[t + 1]
+        G[t] = (gamma**t) * rewards[t] + G[t + 1]
 
     weighted = L * (G[:T] - baseline[:T].view(-1, 1)).unsqueeze(-1)
     return weighted.sum(dim=(0, 1)) / B
@@ -90,6 +92,7 @@ def gradient_step(
     *,
     T: int,
     B: int,
+    gamma: float = 1.0,
     baseline: torch.Tensor | None = None,
     population_flow_fn=exact_population_flow,
     generator: torch.Generator | None = None,
@@ -100,7 +103,7 @@ def gradient_step(
     n_particles=...)` for the empirical-flow variant), then form the
     estimate from one main batch. Returns shape (D,)."""
     mu_flow = population_flow_fn(env, action_probs_fn, theta, mu0, T, generator=generator)
-    return gradient_estimate(env, action_probs_fn, theta, mu_flow, mu0, T, B, baseline=baseline, generator=generator)
+    return gradient_estimate(env, action_probs_fn, theta, mu_flow, mu0, T, B, gamma=gamma, baseline=baseline, generator=generator)
 
 
 def train(
@@ -112,6 +115,7 @@ def train(
     T: int,
     n_train: int,
     B: int,
+    gamma: float = 1.0,
     lr: float = 1e-3,
     baseline: torch.Tensor | None = None,
     population_flow_fn=exact_population_flow,
@@ -130,7 +134,7 @@ def train(
 
     for _ in range(n_train):
         g_hat = gradient_step(
-            env, action_probs_fn, theta, mu0, T=T, B=B, baseline=baseline, population_flow_fn=population_flow_fn, generator=generator
+            env, action_probs_fn, theta, mu0, T=T, B=B, gamma=gamma, baseline=baseline, population_flow_fn=population_flow_fn, generator=generator
         )
         optimizer.zero_grad()
         theta.grad = -g_hat

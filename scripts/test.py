@@ -42,9 +42,12 @@ for path in (SRC, ROOT):
 import torch
 
 from mfc.algorithms import simplex
+from mfc.environments.advertising import Advertising
+from mfc.environments.cybersecurity import CyberSecurity
+from mfc.environments.distribution_planning import DistributionPlanning
 from mfc.environments.twostate import TwoState
 
-ENVIRONMENTS = {"twostate": TwoState}
+ENVIRONMENTS = {"twostate": TwoState, "cybersecurity": CyberSecurity, "distribution_planning": DistributionPlanning, "advertising": Advertising}
 
 
 # --------------------------------------------------------------------------
@@ -52,13 +55,25 @@ ENVIRONMENTS = {"twostate": TwoState}
 # --------------------------------------------------------------------------
 
 
-def load_runs(env_name: str, alg_name: str, config_name: str, *, output_dir: str = str(ROOT / "runs")) -> list[dict]:
+def load_runs(env_name: str, alg_name: str, config_name: str, *, output_dir: str = str(ROOT / "runs"), device: str | None = None) -> list[dict]:
     """Load every individual run file scripts.train.run_all saved for this
     (env, alg, config). Matches on "..._seed<N>.pt" specifically (not just
     "{alg}_*.pt") so this never picks up run_diagnostics' own
-    "{alg}_diagnostics.pt" summary file sitting in the same directory."""
+    "{alg}_diagnostics.pt" summary file sitting in the same directory.
+    Tensors in each loaded run are moved to `device` (default: the ambient
+    `torch.get_default_device()` — only correct if a caller has actually set
+    one, e.g. a notebook's setup cell or tests/conftest.py; pass the target
+    env's own `.device` explicitly otherwise, since environments auto-detect
+    CUDA regardless of the torch-global default), so checkpoints cached from
+    a different device (e.g. CPU-trained results reloaded in a CUDA session)
+    work without retraining."""
     root = Path(output_dir) / env_name / config_name
-    return [torch.load(f, weights_only=False) for f in sorted(root.glob(f"{alg_name}_*_seed*.pt"))]
+    device = device if device is not None else torch.get_default_device()
+    runs = []
+    for f in sorted(root.glob(f"{alg_name}_*_seed*.pt")):
+        run = torch.load(f, weights_only=False)
+        runs.append({k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in run.items()})
+    return runs
 
 
 def group_by(runs: list[dict], *keys: str) -> dict[tuple, list[dict]]:
@@ -82,6 +97,28 @@ def constant_policy_fn(pi: torch.Tensor):
 
     def action_probs_fn(theta, t, state, mu):
         return pi[state]
+
+    return action_probs_fn
+
+
+def reference_policy_fn(env, *, action: int = 1):
+    """
+    Wraps `env.reference_policy(p)` (e.g. `mfc.environments.advertising
+    .Advertising`'s closed-form infinite-horizon optimal advertising rate,
+    a function of the population law alone) as an
+    `action_probs_fn(theta, t, state, mu)` (theta, t, state ignored) so it
+    can be fed through the same flow/rollout machinery as a learned policy.
+    `action` is the index the reference policy's returned probability
+    applies to (default 1: "display an advertisement" for advertising).
+    Assumes a 2-action environment (`1 - action` is the complement).
+    """
+    assert env.n_actions == 2, "reference_policy_fn assumes a 2-action environment"
+
+    def action_probs_fn(theta, t, state, mu):
+        q = env.reference_policy(mu[action])
+        # built via stack (not in-place indexing) so this stays vmap-safe,
+        # since `eval_batched`/`state_distribution` trace this under vmap
+        return torch.stack([q, 1.0 - q]) if action == 0 else torch.stack([1.0 - q, q])
 
     return action_probs_fn
 
@@ -115,6 +152,25 @@ def policy_error(env, action_probs_fn, theta: torch.Tensor) -> torch.Tensor:
     return errors
 
 
+def intervention_probability(env, action_probs_fn, theta: torch.Tensor, mu_flow: torch.Tensor, *, action: int = 1) -> torch.Tensor:
+    """
+    A_t := sum_x mu_t(x) pi_t(action|x,mu_t), the population-averaged
+    probability of taking `action` (default 1: cybersecurity's "switch
+    protection level") under the given policy, at each t of the given flow
+    (reference "Evaluation criteria"). `mu_flow`: shape (T+1, n_states),
+    e.g. from `state_distribution`. Environment-agnostic. Returns shape (T+1,).
+    """
+    theta = theta.detach()
+    T1, N = mu_flow.shape
+    states_all = torch.arange(N, device=theta.device)
+    out = torch.zeros(T1, dtype=theta.dtype, device=theta.device)
+    for t in range(T1):
+        mu_t = mu_flow[t]
+        pi = simplex.eval_batched(action_probs_fn, theta, t, states_all, mu_t)  # (N, A)
+        out[t] = (mu_t * pi[:, action]).sum()
+    return out
+
+
 def population_tracking_error(env, action_probs_fn, theta: torch.Tensor, mu0: torch.Tensor, T: int) -> torch.Tensor:
     """
     E_flow(theta) = (1/T) sum_{t=1}^T d_TV(mu_t^theta, target_law): average
@@ -127,24 +183,91 @@ def population_tracking_error(env, action_probs_fn, theta: torch.Tensor, mu0: to
 
 
 # --------------------------------------------------------------------------
+# Distribution-planning-specific diagnostics (reference "Evaluation criteria")
+# --------------------------------------------------------------------------
+
+
+def terminal_mismatch_l2(env, action_probs_fn, theta: torch.Tensor, mu0: torch.Tensor, T: int) -> torch.Tensor:
+    """E_T^(2)(theta) = ||mu_T^theta - mu_target||_2. Requires `env.target_law`."""
+    mu_flow = state_distribution(env, action_probs_fn, theta.detach(), mu0, T)
+    return (mu_flow[T] - env.target_law).norm()
+
+
+def average_mismatch_l2(env, action_probs_fn, theta: torch.Tensor, mu0: torch.Tensor, T: int) -> torch.Tensor:
+    """E_bar^(2)(theta) = (1/(T+1)) sum_{t=0}^T ||mu_t^theta - mu_target||_2. Requires `env.target_law`."""
+    mu_flow = state_distribution(env, action_probs_fn, theta.detach(), mu0, T)
+    return (mu_flow - env.target_law).norm(dim=-1).mean()
+
+
+def cyclic_wasserstein(mu: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """
+    W_{1,d_cyc}(mu, target): the reference's terminal transport discrepancy
+    E_T^(W), computed exactly for a discrete law on a cycle of length N via
+    the closed-form circular-EMD reduction: with F_mu, F_target the
+    cumulative laws (cutting the circle at index 0), d = F_mu - F_target,
+    W_1 = sum_i |d_i - median(d)| (any median-minimizing c gives the same
+    optimal L1 cost; `torch.quantile` matches). Verified against known
+    point-mass ground truth (d_cyc(0,k) for all k) before use here.
+    """
+    F_mu = torch.cumsum(mu, dim=-1)
+    F_target = torch.cumsum(target, dim=-1)
+    d = F_mu - F_target
+    c = torch.quantile(d, 0.5)
+    return (d - c).abs().sum()
+
+
+def cumulative_movement(env, action_probs_fn, theta: torch.Tensor, mu0: torch.Tensor, T: int, *, stay_action: int) -> torch.Tensor:
+    """
+    C_mov(theta) = sum_{t=0}^{T-1} sum_x mu_t(x) [1 - pi_t(stay_action|x,mu_t)]:
+    expected cumulative movement (probability mass that moves at each step,
+    summed over the episode). `stay_action` is the "remain in place" action
+    index (e.g. `distribution_planning.STAY`); environment-agnostic otherwise.
+    """
+    theta = theta.detach()
+    mu_flow = state_distribution(env, action_probs_fn, theta, mu0, T)
+    N = env.n_states
+    states_all = torch.arange(N, device=theta.device)
+    total = torch.zeros((), dtype=theta.dtype, device=theta.device)
+    for t in range(T):
+        mu_t = mu_flow[t]
+        pi = simplex.eval_batched(action_probs_fn, theta, t, states_all, mu_t)  # (N, A)
+        total = total + (mu_t * (1.0 - pi[:, stay_action])).sum()
+    return total
+
+
+# --------------------------------------------------------------------------
 # Gradient bias / variance
 # --------------------------------------------------------------------------
 
 
-def exact_gradient(env, action_probs_fn, theta: torch.Tensor, mu0: torch.Tensor, T: int) -> torch.Tensor:
+def exact_gradient(env, action_probs_fn, theta: torch.Tensor, mu0: torch.Tensor, T: int, *, gamma: float = 1.0) -> torch.Tensor:
     """
     grad_theta J(theta;mu0), the true unperturbed gradient, via ordinary
     autograd through the differentiable exact population flow. Ground truth
     for `gradient_diagnostics`; never used inside the model-free estimator
     (differentiating the dynamics is exactly what it's built to avoid).
+    `gamma=1.0` (default) recovers the undiscounted objective; pass the
+    environment's own discount (e.g. `env.config.gamma`) when it has one.
     """
     theta = theta.detach().requires_grad_(True)
-    J = simplex.exact_objective(env, action_probs_fn, theta, mu0, T, detach=False)
+    J = simplex.exact_objective(env, action_probs_fn, theta, mu0, T, gamma=gamma, detach=False)
     return torch.autograd.grad(J, theta)[0]
 
 
 def gradient_diagnostics(
-    env, action_probs_fn, theta: torch.Tensor, mu0: torch.Tensor, T: int, *, lam: float, n_aux: int, B: int, sigma: float, reps: int, generator=None
+    env,
+    action_probs_fn,
+    theta: torch.Tensor,
+    mu0: torch.Tensor,
+    T: int,
+    *,
+    lam: float,
+    n_aux: int,
+    B: int,
+    sigma: float,
+    reps: int,
+    gamma: float = 1.0,
+    generator=None,
 ) -> dict:
     """
     Empirical bias and variance of the simplex plug-in gradient estimator at
@@ -152,12 +275,15 @@ def gradient_diagnostics(
     compared to `exact_gradient`. The reported bias mixes the theorem's
     O(lambda) perturbation bias with any residual plug-in bias from the
     auxiliary sensitivity estimate; the two aren't separable from samples
-    alone.
+    alone. `gamma=1.0` (default) recovers the undiscounted objective/estimator.
     """
     theta = theta.detach()
-    oracle = exact_gradient(env, action_probs_fn, theta, mu0, T)
+    oracle = exact_gradient(env, action_probs_fn, theta, mu0, T, gamma=gamma)
     samples = torch.stack(
-        [simplex.gradient_step(env, action_probs_fn, theta, mu0, T=T, n_aux=n_aux, B=B, lam=lam, sigma=sigma, generator=generator) for _ in range(reps)]
+        [
+            simplex.gradient_step(env, action_probs_fn, theta, mu0, T=T, n_aux=n_aux, B=B, lam=lam, sigma=sigma, gamma=gamma, generator=generator)
+            for _ in range(reps)
+        ]
     )
     mean = samples.mean(dim=0)
     return {
@@ -191,12 +317,16 @@ def theta_diagnostics(theta_finals: torch.Tensor, optimal_theta: torch.Tensor | 
 # --------------------------------------------------------------------------
 
 
-def objective_gap(env, action_probs_fn, theta: torch.Tensor, mu0: torch.Tensor, T: int, *, lam: float, sigma: float, n_samples: int, generator=None) -> dict:
-    """J^lambda(theta) (Monte Carlo) vs. J(theta) (exact), at the given theta."""
+def objective_gap(
+    env, action_probs_fn, theta: torch.Tensor, mu0: torch.Tensor, T: int, *, lam: float, sigma: float, n_samples: int, gamma: float = 1.0, generator=None
+) -> dict:
+    """J^lambda(theta) (Monte Carlo) vs. J(theta) (exact), at the given
+    theta. `gamma=1.0` (default) recovers the undiscounted objective; pass
+    the environment's own discount (e.g. `env.config.gamma`) when it has one."""
     theta = theta.detach()
-    J = simplex.exact_objective(env, action_probs_fn, theta, mu0, T)
+    J = simplex.exact_objective(env, action_probs_fn, theta, mu0, T, gamma=gamma)
     mu_flow = simplex.exact_population_flow(env, action_probs_fn, theta, mu0, T)
-    samples = simplex.estimate_objective(env, action_probs_fn, theta, mu_flow, mu0, T, lam, sigma, n_samples, generator=generator)
+    samples = simplex.estimate_objective(env, action_probs_fn, theta, mu_flow, mu0, T, lam, sigma, n_samples, gamma=gamma, generator=generator)
     return {"J": J, "J_lambda_mean": samples.mean(), "J_lambda_se": samples.std() / n_samples**0.5, "gap": samples.mean() - J}
 
 
@@ -230,21 +360,25 @@ def perturbation_coverage(mu_samples: torch.Tensor, lam: float, sigma: float, n_
 # --------------------------------------------------------------------------
 
 
-def generalization_eval(env, action_probs_fn, theta: torch.Tensor, mu0: torch.Tensor, T: int, scenarios: list[dict]) -> list[dict]:
+def generalization_eval(env, action_probs_fn, theta: torch.Tensor, mu0: torch.Tensor, T: int, scenarios: list[dict], *, gamma: float = 1.0) -> list[dict]:
     """
     Evaluate the trained (env, theta) exactly under each scenario without
     retraining. Each scenario is a dict with a `name` and optional
     overrides `env` (a substitute env instance, e.g. with a different
     kappa/lambda0/lambda1 for model misspecification or interaction
     strength), `mu0`, `T` (default: the given ones). Covers context.md's
-    "generalization" axis.
+    "generalization" axis. `gamma=1.0` (default) recovers the undiscounted
+    objective; pass the environment's own discount (e.g. `env.config.gamma`)
+    when it has one — a scenario's own substitute `env` can also override it
+    via a `gamma` key.
     """
     results = []
     for sc in scenarios:
         sc_env = sc.get("env", env)
         sc_mu0 = sc.get("mu0", mu0)
         sc_T = sc.get("T", T)
-        J = simplex.exact_objective(sc_env, action_probs_fn, theta.detach(), sc_mu0, sc_T)
+        sc_gamma = sc.get("gamma", gamma)
+        J = simplex.exact_objective(sc_env, action_probs_fn, theta.detach(), sc_mu0, sc_T, gamma=sc_gamma)
         results.append({"name": sc["name"], "J": J})
     return results
 
@@ -273,16 +407,17 @@ def rollout(env, action_probs_fn, theta: torch.Tensor, mu0: torch.Tensor, T: int
 
 
 def run_diagnostics(env_name: str, alg_name: str, config_name: str, *, output_dir: str = str(ROOT / "runs")) -> dict:
-    runs = load_runs(env_name, alg_name, config_name, output_dir=output_dir)
+    env = ENVIRONMENTS[env_name]()
+    runs = load_runs(env_name, alg_name, config_name, output_dir=output_dir, device=env.device)
     if not runs:
         print(f"no saved runs found under {output_dir}/{env_name}/{config_name}/{alg_name}_*.pt; run scripts/train.py first")
         return {}
 
-    env = ENVIRONMENTS[env_name]()
     action_probs_fn = env.policy_probs
     cfg = runs[0]["config"]
-    mu0_val = torch.tensor(cfg.mu0_val, dtype=env.dtype)
+    mu0_val = torch.tensor(cfg.mu0_val, dtype=env.dtype, device=env.device)
     optimal_theta = env.optimal_theta() if hasattr(env, "optimal_theta") else None
+    gamma = getattr(env.config, "gamma", 1.0)
 
     diagnostics = {}
     for key, group in group_by(runs, "budget_mode", "flow", "T", "lam").items():
@@ -305,7 +440,7 @@ def run_diagnostics(env_name: str, alg_name: str, config_name: str, *, output_di
             entry["population_tracking_error"] = population_tracking_error(env, action_probs_fn, theta, mu0_val, T)
         # J^lambda vs J is only defined for the simplex perturbation.
         if alg_name == "simplex":
-            entry["objective_gap"] = objective_gap(env, action_probs_fn, theta, mu0_val, T, lam=lam, sigma=cfg.sigma, n_samples=2000)
+            entry["objective_gap"] = objective_gap(env, action_probs_fn, theta, mu0_val, T, lam=lam, sigma=cfg.sigma, n_samples=2000, gamma=gamma)
 
         diagnostics[key] = entry
         summary = f"theta_std={entry['theta']['std'].tolist()}"

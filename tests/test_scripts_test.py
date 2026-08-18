@@ -10,6 +10,7 @@ from scripts.test import (
     generalization_eval,
     gradient_diagnostics,
     group_by,
+    intervention_probability,
     load_runs,
     objective_gap,
     perturbation_coverage,
@@ -43,6 +44,16 @@ def test_state_distribution_matches_optimal_policy_fixed_point():
     flow = state_distribution(env, constant_policy_fn(env.optimal_policy()), env.optimal_theta(), mu0, T=3)
     assert torch.allclose(flow[1], env.target_law, atol=1e-10)
     assert torch.allclose(flow[3], env.target_law, atol=1e-10)
+
+
+def test_intervention_probability_matches_hand_computed_average():
+    env = TwoState()
+    theta = env.optimal_theta()
+    pi = env.optimal_policy()  # pi[:,1]=pi(MV|.) = [0.8, 0.75]
+    mu_flow = torch.tensor([[0.6, 0.4], [0.3, 0.7]], dtype=env.dtype)
+    A = intervention_probability(env, env.policy_probs, theta, mu_flow, action=1)
+    expected = mu_flow @ pi[:, 1]
+    assert torch.allclose(A, expected, atol=1e-10)
 
 
 def test_theta_diagnostics_matches_hand_computed_statistics():

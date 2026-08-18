@@ -44,18 +44,68 @@ for path in (SRC, ROOT):
 
 import torch
 
+from configs.advertising import MAIN as ADVERTISING_MAIN
+from configs.advertising import MID as ADVERTISING_MID
+from configs.advertising import SMOKE as ADVERTISING_SMOKE
+from configs.cybersecurity import MAIN as CYBERSECURITY_MAIN
+from configs.cybersecurity import MID as CYBERSECURITY_MID
+from configs.cybersecurity import SMOKE as CYBERSECURITY_SMOKE
+from configs.distribution_planning import MAIN as DISTRIBUTION_PLANNING_MAIN
+from configs.distribution_planning import MID as DISTRIBUTION_PLANNING_MID
+from configs.distribution_planning import SMOKE as DISTRIBUTION_PLANNING_SMOKE
 from configs.twostate import MAIN as TWOSTATE_MAIN
 from configs.twostate import MID as TWOSTATE_MID
 from configs.twostate import SMOKE as TWOSTATE_SMOKE
 from mfc.algorithms import _common, mfreinforce, reinforce, simplex
+from mfc.environments.advertising import Advertising
+from mfc.environments.cybersecurity import CyberSecurity
+from mfc.environments.distribution_planning import DistributionPlanning
 from mfc.environments.twostate import TwoState
 
-ENVIRONMENTS = {"twostate": TwoState}
-CONFIGS = {"twostate": {"main": TWOSTATE_MAIN, "mid": TWOSTATE_MID, "smoke": TWOSTATE_SMOKE}}
+ENVIRONMENTS = {"twostate": TwoState, "cybersecurity": CyberSecurity, "distribution_planning": DistributionPlanning, "advertising": Advertising}
+CONFIGS = {
+    "twostate": {"main": TWOSTATE_MAIN, "mid": TWOSTATE_MID, "smoke": TWOSTATE_SMOKE},
+    "cybersecurity": {"main": CYBERSECURITY_MAIN, "mid": CYBERSECURITY_MID, "smoke": CYBERSECURITY_SMOKE},
+    "distribution_planning": {"main": DISTRIBUTION_PLANNING_MAIN, "mid": DISTRIBUTION_PLANNING_MID, "smoke": DISTRIBUTION_PLANNING_SMOKE},
+    "advertising": {"main": ADVERTISING_MAIN, "mid": ADVERTISING_MID, "smoke": ADVERTISING_SMOKE},
+}
 
 SUPPORTED_BUDGET_MODES = {"equal_parameters", "equal_budget"}
 SUPPORTED_FLOWS = {"exact", "particle"}
 ALGORITHMS_WITH_PERTURBATION_SCALE = {"simplex"}  # reinforce has no lambda; sweeping it would just retrain redundantly
+
+# Environment-specific per-iteration initial-law sampling ("Training
+# protocol" for each benchmark): two-state resamples mu0(1)~U([mu0_low,
+# mu0_high]) from RunConfig-level bounds; cybersecurity, distribution_planning,
+# and advertising each expose their own `env.sample_mu0` (a model constant,
+# not RunConfig-parametrized — cybersecurity/distribution_planning sample
+# Dirichlet(1,...,1), advertising samples p0~U([0.05,0.95]), but the
+# call site is identical for all three). Each factory closes over (cfg, env)
+# and returns `sample(generator) -> mu0`.
+INIT_SEED = 0  # fixed, reused across all training seeds within a run, so paired runs share one policy initialization
+
+
+def _twostate_mu0_sampler(cfg, env):
+    def sample(generator):
+        m1 = torch.rand((), dtype=env.dtype, device=env.device, generator=generator) * (cfg.mu0_high - cfg.mu0_low) + cfg.mu0_low
+        return torch.stack([1.0 - m1, m1])
+
+    return sample
+
+
+def _env_sample_mu0_sampler(cfg, env):
+    def sample(generator):
+        return env.sample_mu0(generator=generator)
+
+    return sample
+
+
+SAMPLE_MU0_FACTORIES = {
+    "twostate": _twostate_mu0_sampler,
+    "cybersecurity": _env_sample_mu0_sampler,
+    "distribution_planning": _env_sample_mu0_sampler,
+    "advertising": _env_sample_mu0_sampler,
+}
 
 
 def make_simplex_step(cfg, flow: str, budget_mode: str):
@@ -82,7 +132,7 @@ def make_simplex_step(cfg, flow: str, budget_mode: str):
     else:
         raise ValueError(f"unknown budget_mode {budget_mode!r}; available: {sorted(SUPPORTED_BUDGET_MODES)}")
 
-    def step(env, action_probs_fn, theta, mu0, *, T, lam, generator):
+    def step(env, action_probs_fn, theta, mu0, *, T, lam, gamma=1.0, generator):
         return simplex.gradient_step(
             env,
             action_probs_fn,
@@ -93,6 +143,7 @@ def make_simplex_step(cfg, flow: str, budget_mode: str):
             B=batch_size(T),
             lam=lam,
             sigma=cfg.sigma,
+            gamma=gamma,
             population_flow_fn=population_flow_fn,
             generator=generator,
         )
@@ -122,9 +173,9 @@ def make_reinforce_step(cfg, flow: str, budget_mode: str):
     else:
         raise ValueError(f"unknown budget_mode {budget_mode!r}; available: {sorted(SUPPORTED_BUDGET_MODES)}")
 
-    def step(env, action_probs_fn, theta, mu0, *, T, lam, generator):
+    def step(env, action_probs_fn, theta, mu0, *, T, lam, gamma=1.0, generator):
         del lam
-        return reinforce.gradient_step(env, action_probs_fn, theta, mu0, T=T, B=batch_size(T), population_flow_fn=population_flow_fn, generator=generator)
+        return reinforce.gradient_step(env, action_probs_fn, theta, mu0, T=T, B=batch_size(T), gamma=gamma, population_flow_fn=population_flow_fn, generator=generator)
 
     return step
 
@@ -146,10 +197,10 @@ def make_mfreinforce_step(cfg, flow: str, budget_mode: str):
     if budget_mode not in SUPPORTED_BUDGET_MODES:
         raise ValueError(f"unknown budget_mode {budget_mode!r}; available: {sorted(SUPPORTED_BUDGET_MODES)}")
 
-    def step(env, action_probs_fn, theta, mu0, *, T, lam, generator):
+    def step(env, action_probs_fn, theta, mu0, *, T, lam, gamma=1.0, generator):
         del lam
         return mfreinforce.gradient_step(
-            env, action_probs_fn, theta, mu0, T=T, n_aux=cfg.n_aux, B=cfg.B, epsilon=cfg.epsilon, population_flow_fn=population_flow_fn, generator=generator
+            env, action_probs_fn, theta, mu0, T=T, n_aux=cfg.n_aux, B=cfg.B, epsilon=cfg.epsilon, gamma=gamma, population_flow_fn=population_flow_fn, generator=generator
         )
 
     return step
@@ -179,26 +230,30 @@ def train_run(
 ) -> dict:
     """Run one (T, lam, seed) — lam is None for algorithms with no
     perturbation scale (see ALGORITHMS_WITH_PERTURBATION_SCALE) — randomizing
-    mu0 every step per the reference's training protocol. Returns everything
-    needed for downstream diagnostics: full theta trajectory and validation
-    history."""
+    mu0 every step per the reference's training protocol (per-environment
+    sampler, see SAMPLE_MU0_FACTORIES). Validates at `cfg.T_val` when the
+    config sets it (cybersecurity: a longer horizon than training, per its
+    "Training and validation protocol"), else at the same `T` used for
+    training (twostate). Discounts by `env.config.gamma` when the
+    environment defines one (else undiscounted, gamma=1.0). Returns
+    everything needed for downstream diagnostics: full theta trajectory and
+    validation history."""
     dtype, device = theta0.dtype, theta0.device
     generator = torch.Generator(device=device).manual_seed(seed)
+    gamma = getattr(env.config, "gamma", 1.0)
+    T_val = getattr(cfg, "T_val", None) or T
 
     theta = theta0.clone().detach().requires_grad_(True)
     optimizer = torch.optim.Adam([theta], lr=cfg.lr)
     mu0_val = torch.tensor(cfg.mu0_val, dtype=dtype, device=device)
+    sample_mu0 = SAMPLE_MU0_FACTORIES[env_name](cfg, env)
 
     theta_history = [theta.detach().clone()]
     val_iterations, val_J = [], []
 
-    def sample_mu0():
-        m1 = torch.rand((), dtype=dtype, device=device, generator=generator) * (cfg.mu0_high - cfg.mu0_low) + cfg.mu0_low
-        return torch.stack([1.0 - m1, m1])
-
     start = time.perf_counter()
     for m in range(cfg.n_train):
-        g_hat = step_fn(env, action_probs_fn, theta, sample_mu0(), T=T, lam=lam, generator=generator)
+        g_hat = step_fn(env, action_probs_fn, theta, sample_mu0(generator), T=T, lam=lam, gamma=gamma, generator=generator)
         optimizer.zero_grad()
         theta.grad = -g_hat
         optimizer.step()
@@ -206,7 +261,7 @@ def train_run(
 
         if m % cfg.validate_every == 0 or m == cfg.n_train - 1:
             val_iterations.append(m)
-            val_J.append(exact_objective(env, action_probs_fn, theta, mu0_val, T).item())
+            val_J.append(exact_objective(env, action_probs_fn, theta, mu0_val, T_val, gamma=gamma).item())
     elapsed = time.perf_counter() - start
 
     return {
@@ -247,7 +302,7 @@ def run_all(env_name: str, alg_name: str, config_name: str, *, output_dir: str =
         return []
 
     env = ENVIRONMENTS[env_name]()
-    theta0 = env.init_theta()
+    theta0 = env.init_theta(generator=torch.Generator(device=env.device).manual_seed(INIT_SEED))
     action_probs_fn = env.policy_probs
 
     out_root = Path(output_dir) / env_name / config_name

@@ -66,6 +66,7 @@ class TwoStateRunConfig:
 
     # horizon
     horizons: tuple[int, ...] = (2,)  # T values to run; main sweeps base/medium/long
+    T_val: int | None = None  # validation horizon, if different from the training T (unused here; see configs/cybersecurity.py)
 
     # Monte Carlo budget and optimization (reference "Training protocol")
     B: int = 200  # main trajectories per gradient step

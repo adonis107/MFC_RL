@@ -46,7 +46,14 @@ class TwoState:
     n_states = 2
     n_actions = 2
 
-    def __init__(self, config: TwoStateConfig = TwoStateConfig(), *, dtype: torch.dtype = torch.float64, device: str = "cpu"):
+    def __init__(
+        self,
+        config: TwoStateConfig = TwoStateConfig(),
+        *,
+        dtype: torch.dtype = torch.float64,
+        device: str | None = None,
+    ):
+        device = device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
         self.config = config
         self.dtype = dtype
         self.device = device
@@ -109,8 +116,11 @@ class TwoState:
         p_move = torch.sigmoid((onehot * theta).sum())
         return torch.stack([1.0 - p_move, p_move])
 
-    def init_theta(self) -> torch.Tensor:
-        """theta_0=(0,0), the reference's initialization."""
+    def init_theta(self, *, generator: torch.Generator | None = None) -> torch.Tensor:
+        """theta_0=(0,0), the reference's initialization. `generator` is
+        accepted (unused: the init is deterministic) so this matches the
+        `env.init_theta(generator=...)` contract shared with environments
+        that need a random initialization (e.g. `mfc.environments.cybersecurity`)."""
         return torch.zeros(self.n_states, dtype=self.dtype, device=self.device)
 
     def optimal_theta(self) -> torch.Tensor:

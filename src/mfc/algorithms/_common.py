@@ -159,14 +159,18 @@ def particle_population_flow(
 
 
 def exact_objective(
-    env, action_probs_fn, theta: torch.Tensor, mu0: torch.Tensor, T: int, *, detach: bool = True
+    env, action_probs_fn, theta: torch.Tensor, mu0: torch.Tensor, T: int, *, gamma: float = 1.0, detach: bool = True
 ) -> torch.Tensor:
     """
-    J(theta;mu0) = sum_{t<T} E_{x~mu_t,a~pi_t}[r_t(x,a,mu_t)] + E_{x~mu_T}[g(x,mu_T)],
+    J(theta;mu0) = sum_{t<T} gamma^t E_{x~mu_t,a~pi_t}[r_t(x,a,mu_t)] + gamma^T E_{x~mu_T}[g(x,mu_T)],
     evaluated exactly (no trajectory noise) via the exact population flow.
-    Environment- and policy-agnostic. `detach=False` keeps the result
-    differentiable in theta (see `exact_population_flow`); used as the
-    ground-truth objective for gradient-bias diagnostics.
+    `gamma=1.0` (default) recovers the undiscounted objective used by
+    environments with no discount factor (e.g. `mfc.environments.twostate`);
+    environments with a genuine discount (e.g. `mfc.environments.cybersecurity`)
+    pass their own `config.gamma`. Environment- and policy-agnostic.
+    `detach=False` keeps the result differentiable in theta (see
+    `exact_population_flow`); used as the ground-truth objective for
+    gradient-bias diagnostics.
     """
     if detach:
         theta = theta.detach()
@@ -182,6 +186,6 @@ def exact_objective(
         mu_t = mu_flow[t]
         pi = eval_batched(action_probs_fn, theta, t, states_all, mu_t)  # (N, A)
         r = env.reward(states_grid, actions_grid, mu_t)  # (N, A)
-        total = total + (mu_t * (pi * r).sum(dim=-1)).sum()
+        total = total + (gamma**t) * (mu_t * (pi * r).sum(dim=-1)).sum()
     g = env.terminal_reward(states_all, mu_flow[T])  # (N,)
-    return total + (mu_flow[T] * g).sum()
+    return total + (gamma**T) * (mu_flow[T] * g).sum()

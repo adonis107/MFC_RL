@@ -85,14 +85,16 @@ def estimate_objective(
     sigma: float,
     n_samples: int,
     *,
+    gamma: float = 1.0,
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     """
     Monte Carlo estimate of J^lambda(theta): n_samples independent
     lambda-perturbed trajectories (same rollout as `gradient_estimate`,
-    without the score/gradient bookkeeping). Returns shape (n_samples,) of
-    returns G_0^(b); average for the estimate, std/sqrt(n_samples) for its
-    Monte Carlo standard error.
+    without the score/gradient bookkeeping). `gamma=1.0` (default) recovers
+    the undiscounted return; see `_common.exact_objective`. Returns shape
+    (n_samples,) of returns G_0^(b); average for the estimate,
+    std/sqrt(n_samples) for its Monte Carlo standard error.
     """
     theta = theta.detach()
     device, dtype = theta.device, theta.dtype
@@ -113,7 +115,8 @@ def estimate_objective(
         else:
             terminal_reward = env.terminal_reward(states, M)
 
-    return rewards.sum(dim=0) + terminal_reward
+    discounts = gamma ** torch.arange(T, dtype=dtype, device=device)
+    return (rewards * discounts.view(-1, 1)).sum(dim=0) + (gamma**T) * terminal_reward
 
 
 def estimate_sensitivity_flow(
@@ -174,13 +177,15 @@ def gradient_estimate(
     lam: float,
     sigma: float,
     *,
+    gamma: float = 1.0,
     baseline: torch.Tensor | None = None,
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     """
     Plug-in simplex policy-gradient estimator ĝ_{B,n,λ,η}(θ)
     (eq. discrete-plugin-gradient-estimator), using the shared auxiliary
-    sensitivity estimate `D_hat`. Returns shape (D,).
+    sensitivity estimate `D_hat`. `gamma=1.0` (default) recovers the
+    undiscounted estimator; see `_common.exact_objective`. Returns shape (D,).
     """
     device, dtype = theta.device, theta.dtype
     N, D = env.n_states, theta.numel()
@@ -208,9 +213,9 @@ def gradient_estimate(
             terminal_reward = env.terminal_reward(states, M)
 
     G = torch.zeros(T + 1, B, dtype=dtype, device=device)
-    G[T] = terminal_reward
+    G[T] = (gamma**T) * terminal_reward
     for t in range(T - 1, -1, -1):
-        G[t] = rewards[t] + G[t + 1]
+        G[t] = (gamma**t) * rewards[t] + G[t + 1]
 
     weighted = Q * (G - baseline.view(-1, 1)).unsqueeze(-1)
     weighted[:T] = weighted[:T] + L * (G[:T] - baseline[:T].view(-1, 1)).unsqueeze(-1)
@@ -229,6 +234,7 @@ def gradient_step(
     lam: float,
     eta: float | None = None,
     sigma: float = 1.0,
+    gamma: float = 1.0,
     baseline_D: float | torch.Tensor = 0.0,
     baseline_G: torch.Tensor | None = None,
     population_flow_fn=exact_population_flow,
@@ -243,7 +249,9 @@ def gradient_step(
     sensitivities from one auxiliary batch, then form the estimate from one
     main batch (Algorithm 1's per-iteration body, factored out so callers
     that need a different μ_0 each step — e.g. the reference's randomized
-    training protocol — can drive the loop themselves). Returns shape (D,).
+    training protocol — can drive the loop themselves). `gamma=1.0`
+    (default) recovers the undiscounted estimator; see
+    `_common.exact_objective`. Returns shape (D,).
     """
     eta = lam if eta is None else eta
     mu_flow = population_flow_fn(env, action_probs_fn, theta, mu0, T, generator=generator)
@@ -251,7 +259,7 @@ def gradient_step(
         env, action_probs_fn, theta, mu_flow, mu0, T, n_aux, eta, sigma, baseline=baseline_D, generator=generator
     )
     return gradient_estimate(
-        env, action_probs_fn, theta, mu_flow, mu0, D_hat, T, B, lam, sigma, baseline=baseline_G, generator=generator
+        env, action_probs_fn, theta, mu_flow, mu0, D_hat, T, B, lam, sigma, gamma=gamma, baseline=baseline_G, generator=generator
     )
 
 
@@ -268,6 +276,7 @@ def train(
     lam: float,
     eta: float | None = None,
     sigma: float = 1.0,
+    gamma: float = 1.0,
     lr: float = 1e-3,
     baseline_D: float | torch.Tensor = 0.0,
     baseline_G: torch.Tensor | None = None,
@@ -299,6 +308,7 @@ def train(
             lam=lam,
             eta=eta,
             sigma=sigma,
+            gamma=gamma,
             baseline_D=baseline_D,
             baseline_G=baseline_G,
             population_flow_fn=population_flow_fn,

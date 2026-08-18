@@ -48,6 +48,16 @@ def test_plot_validation_curve_labels_by_algorithm_when_no_lambda():
     assert labels == ["reinforce"]
 
 
+def test_plot_validation_curve_keeps_multiple_no_lambda_algorithms_separate():
+    """Two lambda-less algorithms (reinforce, mfreinforce) both store
+    lam=None; grouping on lam alone would silently average their runs
+    together into one line (the bug this regression-tests)."""
+    runs = [_fake_run(None, seed, alg="reinforce") for seed in range(3)] + [_fake_run(None, seed, alg="mfreinforce") for seed in range(3)]
+    fig, ax = viz.plot_validation_curve(runs)
+    labels = sorted(line.get_label() for line in ax.lines)
+    assert labels == ["mfreinforce", "reinforce"]
+
+
 def test_plot_state_distribution_has_one_line_per_state_and_integer_ticks():
     mu_flow = torch.tensor([[0.8, 0.2], [0.6, 0.4], [0.5, 0.5]])
     fig, ax = viz.plot_state_distribution(mu_flow, target_law=torch.tensor([0.6, 0.4]))
@@ -55,6 +65,27 @@ def test_plot_state_distribution_has_one_line_per_state_and_integer_ticks():
     ax.figure.canvas.draw()
     xticks = ax.get_xticks()
     assert all(float(t).is_integer() for t in xticks)
+
+
+def test_plot_state_distribution_uses_custom_state_labels():
+    mu_flow = torch.tensor([[0.25, 0.25, 0.25, 0.25], [0.4, 0.2, 0.3, 0.1]])
+    fig, ax = viz.plot_state_distribution(mu_flow, state_labels=["DI", "DS", "UI", "US"])
+    labels = [line.get_label() for line in ax.lines]
+    assert labels == ["DI", "DS", "UI", "US"]
+
+
+def test_plot_population_fractions_one_line_per_series():
+    series = {"infected": torch.tensor([0.5, 0.4, 0.3]), "defended": torch.tensor([0.2, 0.3, 0.4])}
+    fig, ax = viz.plot_population_fractions(series)
+    labels = [line.get_label() for line in ax.lines]
+    assert labels == ["infected", "defended"]
+
+
+def test_plot_distribution_comparison_one_bar_group_per_name():
+    distributions = {"initial": torch.tensor([0.5, 0.5, 0.0]), "target": torch.tensor([0.2, 0.3, 0.5])}
+    fig, ax = viz.plot_distribution_comparison(distributions, state_labels=["a", "b", "c"])
+    assert len(ax.patches) == 2 * 3  # 2 distributions x 3 states
+    assert [t.get_text() for t in ax.get_xticklabels()] == ["a", "b", "c"]
 
 
 def test_plot_objective_gap_draws_J_per_lambda_not_a_flat_reference():

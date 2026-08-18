@@ -23,6 +23,13 @@ def _fig_ax(ax, *, figsize=(6.0, 4.0)):
     return (ax.figure, ax) if ax is not None else new_figure(figsize=figsize)
 
 
+def _cpu(t):
+    """matplotlib needs numpy-convertible arrays; move CUDA tensors to CPU
+    first (`.item()` on a scalar already does this implicitly, so this is
+    only needed where a whole tensor is handed to a plot/fill call)."""
+    return t.detach().cpu() if isinstance(t, torch.Tensor) else t
+
+
 def _integer_xaxis(ax):
     """Time/horizon axes are inherently integer-valued; avoid fractional ticks on short ranges."""
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
@@ -32,25 +39,28 @@ def plot_validation_curve(runs: list[dict], *, optimal_J: float | None = None, a
     """
     Evolution of the validation objective with training steps (context.md:
     "evolution of validation rewards ... with training steps"). `runs` is a
-    list of `scripts.train.train_run` dicts; grouped by `lam` into one line
-    each (algorithms with no perturbation scale, e.g. reinforce, store
-    `lam=None` for every run and are labeled by algorithm name instead),
-    with seeds sharing a lambda averaged and shown as a +-1 std band.
+    list of `scripts.train.train_run` dicts; grouped by `(alg, lam)` into
+    one line each (algorithms with no perturbation scale, e.g. reinforce and
+    mfreinforce, store `lam=None` for every run and are labeled by algorithm
+    name instead — grouping on `alg` too, not just `lam`, keeps several
+    such algorithms compared side by side from colliding into one averaged
+    line), with seeds sharing a group averaged and shown as a +-1 std band.
     `optimal_J`, if given (e.g. `simplex.exact_objective` at
     `env.optimal_theta()`), is drawn as a reference line.
     """
     fig, ax = _fig_ax(ax)
-    groups: dict[float | None, list[dict]] = {}
+    groups: dict[tuple[str, float | None], list[dict]] = {}
     for r in runs:
-        groups.setdefault(r["lam"], []).append(r)
+        groups.setdefault((r.get("alg", "run"), r["lam"]), []).append(r)
 
-    for i, lam in enumerate(sorted(groups, key=lambda x: (x is None, x))):
-        group = groups[lam]
-        iters = group[0]["validation_iterations"]
+    for i, key in enumerate(sorted(groups, key=lambda k: (k[1] is None, k[1], k[0]))):
+        alg, lam = key
+        group = groups[key]
+        iters = _cpu(group[0]["validation_iterations"])
         J = torch.stack([g["validation_J"] for g in group])  # (n_seeds, K)
-        mean, std = J.mean(dim=0), J.std(dim=0)
+        mean, std = _cpu(J.mean(dim=0)), _cpu(J.std(dim=0))
         color = color_for(i)
-        label = f"λ={lam}" if lam is not None else group[0].get("alg", "run")
+        label = f"λ={lam}" if lam is not None else alg
         ax.plot(iters, mean, color=color, linewidth=2, label=label)
         if len(group) > 1:
             ax.fill_between(iters, mean - std, mean + std, color=color, alpha=0.15, linewidth=0)
@@ -63,22 +73,26 @@ def plot_validation_curve(runs: list[dict], *, optimal_J: float | None = None, a
     return fig, ax
 
 
-def plot_state_distribution(mu_flow, *, target_law=None, optimal_flow=None, ax=None):
+def plot_state_distribution(mu_flow, *, target_law=None, optimal_flow=None, state_labels=None, ax=None):
     """
     State distribution over time under a policy (context.md: "state
     distribution over time using learned policy (with optimal benchmark
     values whenever available)"). `mu_flow`: shape (T+1, n_states), e.g.
-    from `scripts.test.state_distribution`. One line per state;
-    `optimal_flow` (same shape, e.g. under `env.optimal_policy()` via
+    from `scripts.test.state_distribution`. One line per state (labeled
+    `state_labels[x]` if given, else "state x"); `optimal_flow` (same
+    shape, e.g. under `env.optimal_policy()` via
     `scripts.test.constant_policy_fn`), if given, drawn dashed for
     comparison; `target_law`, if given, as horizontal references.
     """
     fig, ax = _fig_ax(ax)
+    mu_flow = _cpu(mu_flow)
+    optimal_flow = _cpu(optimal_flow)
     T1, n_states = mu_flow.shape
+    labels = state_labels or [f"state {x}" for x in range(n_states)]
     t = range(T1)
     for x in range(n_states):
         color = color_for(x)
-        ax.plot(t, mu_flow[:, x], color=color, linewidth=2, marker="o", markersize=5, label=f"state {x}")
+        ax.plot(t, mu_flow[:, x], color=color, linewidth=2, marker="o", markersize=5, label=labels[x])
         if optimal_flow is not None:
             ax.plot(t, optimal_flow[:, x], color=color, linewidth=1.5, linestyle="--", alpha=0.7)
         if target_law is not None:
@@ -87,6 +101,55 @@ def plot_state_distribution(mu_flow, *, target_law=None, optimal_flow=None, ax=N
     apply_style(ax, xlabel="t", ylabel="P(X_t = x)")
     ax.set_ylim(-0.02, 1.02)
     _integer_xaxis(ax)
+    style_legend(ax)
+    return fig, ax
+
+
+def plot_population_fractions(series: dict, *, ax=None):
+    """
+    One or more scalar population-level fractions over time — e.g.
+    cybersecurity's aggregate infected I_t=mu_t(DI)+mu_t(UI), defended
+    D_t=mu_t(DI)+mu_t(DS) (`CyberSecurity.aggregate_fractions`), or the
+    population-averaged intervention probability
+    A_t=sum_x mu_t(x)pi_t(1|x,mu_t) (`scripts.test.intervention_probability`)
+    — beyond the per-state flow `plot_state_distribution` already covers.
+    `series`: {name: tensor of shape (T+1,)}, one line each.
+    """
+    fig, ax = _fig_ax(ax)
+    for i, (name, values) in enumerate(series.items()):
+        values = _cpu(values)
+        t = range(len(values))
+        ax.plot(t, values, color=color_for(i), linewidth=2, marker="o", markersize=5, label=name)
+
+    apply_style(ax, xlabel="t", ylabel="fraction")
+    ax.set_ylim(-0.02, 1.02)
+    _integer_xaxis(ax)
+    style_legend(ax)
+    return fig, ax
+
+
+def plot_distribution_comparison(distributions: dict, *, state_labels=None, ax=None):
+    """
+    Several named laws over the same state space, grouped by state (e.g.
+    distribution planning's reference "Evaluation criteria": initial,
+    target, and terminal population distributions side by side).
+    `distributions`: {name: tensor of shape (n_states,)}, one bar-color per name.
+    """
+    fig, ax = _fig_ax(ax)
+    names = list(distributions)
+    n_states = distributions[names[0]].shape[0]
+    labels = state_labels or [str(x) for x in range(n_states)]
+    width = 0.8 / len(names)
+    positions = range(n_states)
+
+    for i, name in enumerate(names):
+        values = _cpu(distributions[name])
+        offsets = [p + (i - (len(names) - 1) / 2) * width for p in positions]
+        ax.bar(offsets, values, width=width * 0.9, color=color_for(i), label=name)
+
+    ax.set_xticks(list(positions))
+    ax.set_xticklabels(labels)
+    apply_style(ax, xlabel="state", ylabel="P(X = x)")
     style_legend(ax)
     return fig, ax
 
@@ -242,6 +305,8 @@ def plot_trajectories(learned, optimal=None, *, ax=None):
     (T+1,), e.g. from `scripts.test.rollout`.
     """
     fig, ax = _fig_ax(ax)
+    learned = _cpu(learned)
+    optimal = _cpu(optimal)
     t = range(len(learned))
     ax.step(t, learned, where="mid", color=color_for(0), linewidth=2, marker="o", markersize=6, label="learned")
     if optimal is not None:
@@ -253,20 +318,25 @@ def plot_trajectories(learned, optimal=None, *, ax=None):
     return fig, ax
 
 
-def plot_horizon_scaling(metric_by_T: dict[int, float], *, ylabel: str = "metric", label: str | None = None, color_index: int = 0, ax=None):
+def plot_horizon_scaling(
+    metric_by_T: dict, *, xlabel: str = "T", ylabel: str = "metric", label: str | None = None, color_index: int = 0, integer_xaxis: bool = True, ax=None
+):
     """
-    A scalar metric vs. horizon T (context.md: "horizon scaling tests
-    (gradient, theta, value vs time)"). Call once per metric/lambda on the
-    same `ax` to overlay several series (pass a distinct `color_index` each
-    time).
+    A scalar metric vs. a swept parameter — horizon T by default
+    (context.md: "horizon scaling tests (gradient, theta, value vs time)"),
+    or any other scalar sweep axis via `xlabel` (e.g. lambda: pass
+    `integer_xaxis=False`, since perturbation scales aren't integer-valued).
+    Call once per metric/lambda on the same `ax` to overlay several series
+    (pass a distinct `color_index` each time).
     """
     fig, ax = _fig_ax(ax)
-    Ts = sorted(metric_by_T)
-    values = [metric_by_T[T] for T in Ts]
-    ax.plot(Ts, values, color=color_for(color_index), linewidth=2, marker="o", markersize=6, label=label)
+    xs = sorted(metric_by_T)
+    values = [metric_by_T[x] for x in xs]
+    ax.plot(xs, values, color=color_for(color_index), linewidth=2, marker="o", markersize=6, label=label)
 
-    apply_style(ax, xlabel="T", ylabel=ylabel)
-    _integer_xaxis(ax)
+    apply_style(ax, xlabel=xlabel, ylabel=ylabel)
+    if integer_xaxis:
+        _integer_xaxis(ax)
     if label:
         style_legend(ax)
     return fig, ax

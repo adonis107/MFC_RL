@@ -29,7 +29,7 @@ def oracle_population_flow(env, action_probs_fn, theta: torch.Tensor, mu0: torch
 
 
 def test_sample_perturbation_lands_on_simplex_interior():
-    U, q = sx.sample_perturbation(4, (1000,), sigma=1.0, dtype=torch.float64, device="cpu")
+    U, q = sx.sample_perturbation(4, (1000,), sigma=1.0, dtype=torch.float64, device=torch.get_default_device())
     assert U.shape == (1000, 3)
     assert q.shape == (1000, 4)
     assert torch.all(q > 0)
@@ -50,13 +50,16 @@ def test_perturbation_score_satisfies_integration_by_parts_identity():
     lam, sigma = 0.3, 1.0
 
     n = 500_000
-    U, q = sx.sample_perturbation(2, (n,), sigma, dtype=torch.float64, device="cpu")
+    U, q = sx.sample_perturbation(2, (n,), sigma, dtype=torch.float64, device=torch.get_default_device())
     H = sx.perturbation_score(U, q, sigma)
     Q = -((1.0 - lam) / lam) * (H @ D)
     M1 = (1.0 - lam) * mu_t[1] + lam * q[:, 1]
-    estimate = (Q * M1.unsqueeze(-1)).mean(dim=0)
+    samples = Q * M1.unsqueeze(-1)
+    estimate, se = samples.mean(dim=0), samples.std(dim=0) / n**0.5
     expected = (1.0 - lam) * (-D[0])
-    assert torch.allclose(estimate, expected, atol=5e-3)
+    # SE-based, not a magic atol: CPU and CUDA use different RNG streams for
+    # the same seed, so the exact Monte Carlo draws (and noise) differ.
+    assert torch.all((estimate - expected).abs() < 6 * se)
 
 
 def test_sensitivity_flow_matches_autograd_oracle():
