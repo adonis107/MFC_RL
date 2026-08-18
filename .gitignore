@@ -10,8 +10,6 @@ runs/
 !README.md
 !docs/
 !docs/**/*.md
-!reference/
-!reference/**/*.tex
 
 # Python/cache files
 __pycache__/
