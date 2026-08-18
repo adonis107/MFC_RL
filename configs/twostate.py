@@ -18,6 +18,15 @@ choices:
   - particle_size: 200 (matches B), the N~ trajectories per step used to
     estimate the population law when flows includes "particle".
 
+MAIN doesn't sweep the full budget_modes x flows x horizons cartesian
+product (12 combinations) — only 5 of them are actually interesting (see
+`groups`'s inline comment on MAIN below); `scripts.train.list_experiments`
+reads `groups` when a config sets it, in place of the cartesian product.
+mfreinforce ignores budget_mode entirely (fixed n_aux/B, below), so of
+MAIN's 5 groups only 4 are distinct mfreinforce training problems —
+`scripts.train.run_all`/`--materialize-duplicates` handle that dedup
+generically, not specific to this config.
+
 Equal-budget allocation. mfreinforce (logit-perturbed MF-REINFORCE) keeps
 the reference's own (n_aux, B) = (10, 200) unchanged, per this task's
 instructions — this is the anchor the other two algorithms are matched to.
@@ -58,6 +67,20 @@ class TwoStateRunConfig:
     budget_modes: tuple[str, ...] = ("equal_parameters",)  # "equal_parameters" and/or "equal_budget"
     flows: tuple[str, ...] = ("exact",)  # "exact" and/or "particle"
     particle_size: int = 200  # N~ trajectories/step for the particle population estimate
+
+    # explicit (budget_mode, flow, T) triples to run, in place of the full
+    # budget_modes x flows x horizons cartesian product `budget_modes`/
+    # `flows`/`horizons` would otherwise define (see `scripts.train.
+    # list_experiments`, which reads `groups` when set and ignores the other
+    # three fields' cartesian product entirely). None (the default, used by
+    # every config below except MAIN) means "use the cartesian product" —
+    # this is the exception, not the norm, so it only exists as an override
+    # on the one config that needs it. `budget_modes`/`flows`/`horizons`
+    # below are still set to describe MAIN's *coverage* (e.g. so anything
+    # that reads `cfg.horizons` directly, like a horizon-scaling plot, still
+    # sees the right values) even though `list_experiments` won't use them
+    # to build the grid.
+    groups: tuple[tuple[str, str, int], ...] | None = None
 
     # perturbation grid (reference "Compared perturbation schemes")
     lambdas: tuple[float, ...] = (0.05, 0.1, 0.2, 0.4, 0.8)  # simplex perturbation scale
@@ -111,9 +134,19 @@ class TwoStateRunConfig:
 
 MAIN = TwoStateRunConfig(
     name="main",
-    budget_modes=("equal_parameters", "equal_budget"),
-    flows=("exact", "particle"),
-    horizons=(2, 5, 10),
+    budget_modes=("equal_parameters", "equal_budget"),  # coverage only; see `groups` below
+    flows=("exact", "particle"),  # coverage only; see `groups` below
+    horizons=(2, 5, 10),  # coverage only; see `groups` below
+    groups=(
+        ("equal_parameters", "exact", 2),
+        ("equal_budget", "exact", 2),
+        ("equal_budget", "particle", 2),
+        ("equal_budget", "particle", 5),
+        ("equal_budget", "particle", 10),
+    ),  # 5 of the 12 (budget_mode, flow, T) combinations the coverage fields above would cartesian-product into:
+    # equal_parameters is only interesting at the base horizon under the exact flow (comparing budget regimes and
+    # comparing flows are each only interesting once, not crossed with the full horizon sweep too); equal_budget's
+    # particle-flow horizon sweep is the one comparison that needs all three horizons.
     n_train=10_000,
     seeds=(0, 1, 2, 3, 4),
 )

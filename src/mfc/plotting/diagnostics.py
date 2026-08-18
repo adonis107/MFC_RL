@@ -318,6 +318,57 @@ def plot_trajectories(learned, optimal=None, *, ax=None):
     return fig, ax
 
 
+def plot_gaussian_flow(mu, Sigma, *, optimal_mu=None, optimal_Sigma=None, label="learned", optimal_label="optimal", ax=None):
+    """
+    Mean +-1 std trajectory of a time-indexed Gaussian law over states
+    (context.md: "state distribution over time using learned policy"), e.g.
+    `mfc.environments.lq.LQ.forward_moments`'s (mu_t^theta, Sigma_t^theta).
+    `mu`/`Sigma`: shape (T+1,). `optimal_mu`/`optimal_Sigma`, if given (e.g.
+    under `LQ.riccati_optimal`), drawn dashed for comparison.
+    """
+    fig, ax = _fig_ax(ax)
+    mu, Sigma = _cpu(mu), _cpu(Sigma)
+    std = Sigma.clamp_min(0).sqrt()
+    t = range(len(mu))
+    ax.plot(t, mu, color=color_for(0), linewidth=2, marker="o", markersize=5, label=label)
+    ax.fill_between(t, mu - std, mu + std, color=color_for(0), alpha=0.15, linewidth=0)
+    if optimal_mu is not None:
+        optimal_mu, optimal_Sigma = _cpu(optimal_mu), _cpu(optimal_Sigma)
+        optimal_std = optimal_Sigma.clamp_min(0).sqrt()
+        ax.plot(t, optimal_mu, color=color_for(1), linewidth=2, linestyle="--", marker="s", markersize=5, label=optimal_label)
+        ax.fill_between(t, optimal_mu - optimal_std, optimal_mu + optimal_std, color=color_for(1), alpha=0.1, linewidth=0)
+
+    apply_style(ax, xlabel="t", ylabel="X_t (mean ± 1 std)")
+    _integer_xaxis(ax)
+    style_legend(ax)
+    return fig, ax
+
+
+def plot_lq_theta(theta, *, optimal_theta=None, ax=None):
+    """
+    theta_t^1 (self gain), theta_t^2 (population gain) vs t, for
+    `mfc.environments.lq`'s genuinely time-indexed (T,2) parametrization
+    (context.md: "theta bias, variance", specialized here to a single seed's
+    per-t trajectory rather than a bias/variance-across-seeds summary, since
+    each t is its own free parameter pair). `theta`/`optimal_theta`
+    (e.g. `LQ.riccati_optimal()`, dashed): shape (T,2).
+    """
+    fig, ax = _fig_ax(ax)
+    theta = _cpu(theta)
+    t = range(theta.shape[0])
+    labels = ["θ^1 (self gain)", "θ^2 (population gain)"]
+    for i in range(2):
+        color = color_for(i)
+        ax.plot(t, theta[:, i], color=color, linewidth=2, marker="o", markersize=5, label=labels[i])
+        if optimal_theta is not None:
+            ax.plot(t, _cpu(optimal_theta)[:, i], color=color, linewidth=1.5, linestyle="--", alpha=0.7)
+
+    apply_style(ax, xlabel="t", ylabel="theta_t")
+    _integer_xaxis(ax)
+    style_legend(ax)
+    return fig, ax
+
+
 def plot_horizon_scaling(
     metric_by_T: dict, *, xlabel: str = "T", ylabel: str = "metric", label: str | None = None, color_index: int = 0, integer_xaxis: bool = True, ax=None
 ):
