@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 
+import pytest
 import torch
 
 from mfc.algorithms import _common, reinforce, simplex
@@ -151,3 +152,43 @@ def test_reinforce_diverges_more_than_simplex_from_a_poor_start():
     dist_reinforce = (theta_reinforce - optimal_theta).norm()
     dist_simplex = (theta_simplex - optimal_theta).norm()
     assert dist_reinforce > dist_simplex
+
+
+@pytest.mark.parametrize("T,gamma,use_baseline", [(3, 1.0, False), (3, 0.9, True), (1, 1.0, True), (0, 1.0, False)])
+def test_gradient_estimate_matches_the_literal_formula(T, gamma, use_baseline):
+    """`reinforce.gradient_estimate` accumulates into one (D,) vector via the
+    running-score-sum rearrangement of sum_t L_t G_t, instead of building the
+    (T,B,D) score tensor. Driven from the same random stream it must
+    reproduce the literal formula, not merely match it in law."""
+    env = TwoState()
+    theta = torch.tensor([0.3, -0.4])
+    mu0 = torch.tensor([0.8, 0.2])
+    B, D = 32, theta.numel()
+    baseline = torch.linspace(-1.0, 1.0, T + 1) if use_baseline else torch.zeros(T + 1)
+    mu_flow = _common.exact_population_flow(env, env.policy_probs, theta, mu0, T)
+
+    # literal transcription of g = (1/B) sum_b sum_t L_t^(b) (G_t^(b) - b_t)
+    gen = torch.Generator(device=torch.get_default_device()).manual_seed(1)
+    states = torch.multinomial(mu0.expand(B, env.n_states), 1, generator=gen).reshape(B)
+    rewards, L = torch.zeros(T, B), torch.zeros(T, B, D)
+    terminal_reward = None
+    for t in range(T + 1):
+        mu_t = mu_flow[t]
+        if t < T:
+            actions = _common.sample_actions(env.policy_probs, theta, t, states, mu_t, generator=gen)
+            L[t] = _common.policy_score(env.policy_probs, theta, t, states, actions, mu_t)
+            rewards[t] = env.reward(states, actions, mu_t)
+            states = env.sample_next_states(states, actions, mu_t, generator=gen)
+        else:
+            terminal_reward = env.terminal_reward(states, mu_t)
+    G = torch.zeros(T + 1, B)
+    G[T] = (gamma**T) * terminal_reward
+    for t in range(T - 1, -1, -1):
+        G[t] = (gamma**t) * rewards[t] + G[t + 1]
+    expected = (L * (G[:T] - baseline[:T].view(-1, 1)).unsqueeze(-1)).sum(dim=(0, 1)) / B
+
+    actual = reinforce.gradient_estimate(
+        env, env.policy_probs, theta, mu_flow, mu0, T, B,
+        gamma=gamma, baseline=baseline, generator=torch.Generator(device=torch.get_default_device()).manual_seed(1),
+    )
+    assert torch.allclose(actual, expected, rtol=1e-11, atol=1e-13)

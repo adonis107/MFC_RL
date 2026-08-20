@@ -1,27 +1,29 @@
 """
-Training for the continuous-state LQ benchmark (`mfc.environments.lq`).
+Training for the continuous-state portfolio benchmark
+(`mfc.environments.portfolio`).
 
-Unlike the discrete algorithms in this package (simplex, mfreinforce,
-reinforce — all built around a categorical state space, `torch.func.vmap`
-policy scoring, and Monte Carlo population-flow estimation), LQ's own
-reference (files/reference/LQ_framework.tex) gives J^lambda(theta) and its
-gradient in closed form, so there is a genuine "exact" training mode with no
-sampling at all: `exact_step` just calls `env.exact_gradient`. The only
-Monte Carlo estimator here is `reinforce_step`, the classical-REINFORCE
-ablation from context.md ("Show missing mean-field term by comparison with
-reinforce"): it simulates trajectories against the *deterministic* nominal
-mean flow mu_t^{theta,0} (`LQ.rollout` detaches theta before computing it)
-and backpropagates only the direct policy score, exactly as
-`mfc.algorithms.reinforce` does for the discrete case — never differentiating
-through the population's own dependence on theta, so it is a structurally
-biased estimator of grad_theta J^lambda(theta).
+Mirrors `mfc.algorithms.lq`'s structure exactly (see its module docstring
+for why this benchmark can't share the discrete simplex/mfreinforce/
+reinforce machinery): `exact_gradient` trains directly from the reference's
+closed-form gradient (`Portfolio.exact_gradient`, no sampling); `reinforce`
+is the classical-REINFORCE ablation (context.md: "Show missing mean-field
+term by comparison with reinforce"), a Monte Carlo score-function estimator
+against the deterministic nominal mean flow (`Portfolio.rollout` detaches
+theta before computing it), never differentiating through the population's
+own dependence on theta.
 
-Sign convention: everything in `mfc.environments.lq` is a *cost* (matching
-the reference's own notation), not a reward to maximize like the rest of
-this repo. So, unlike `mfc.algorithms.{simplex,mfreinforce,reinforce}`
-(which negate their reward gradient before an ascent step, `theta.grad =
--g_hat`), training here sets `theta.grad = g_hat` directly and lets Adam
-descend on cost.
+Sign convention: UNLIKE `mfc.environments.lq` (a cost to minimize, matching
+its own reference's notation), `mfc.environments.portfolio`'s J^lambda is a
+REWARD to maximize (E[X_T] - chi*Var(X_T), "the policy is selected... to
+maximize the terminal expected wealth penalized by its variance") — the same
+convention as the rest of this repo's discrete algorithms. `train` here
+therefore ascends (`theta.grad = -g_hat`), not descends like
+`mfc.algorithms.lq.train`.
+
+There is no running reward (`Portfolio`'s cost is purely terminal), so
+unlike LQ's cost-to-go sum, `reinforce_step`'s policy score at every t is
+weighted by the *same* single terminal reward — no backward accumulation
+needed.
 """
 
 from __future__ import annotations
@@ -45,25 +47,26 @@ def reinforce_step(
 ) -> torch.Tensor:
     """
     Monte Carlo estimate of grad_theta J^lambda(theta), missing the
-    mean-field sensitivity term: g_hat = (1/B) sum_b sum_t
-    grad_theta log(pi_t^theta(alpha_t^(b)|X_t^(b),mu_hat_t)) * G_t^(b), with
-    G_t^(b) the cost-to-go from t (running costs t..T-1 plus the terminal
-    cost). `mu_hat_t` is treated as exogenous (see `LQ.rollout`), so this
-    never captures how theta influences the population mean itself — the
-    same ablation `mfc.algorithms.reinforce` implements for the discrete
-    case. `theta` must require grad. Returns shape (T,2).
+    mean-field sensitivity term: g_hat = (1/B) sum_b [sum_t grad_theta
+    log(pi_t^theta(alpha_t^(b)|X_t^(b),mu_hat_t))] * R^(b), with R^(b) :=
+    X_T^(b) - chi*(X_T^(b)-mu_hat_T)^2 the per-particle terminal reward
+    (`Portfolio`'s own g(x,m), using the deterministic mu_hat_T as the
+    population-mean argument — see `Portfolio.rollout`). `mu_hat` is
+    treated as exogenous throughout, so this never captures how theta
+    influences the population mean itself — the same ablation
+    `mfc.algorithms.reinforce` implements for the discrete case, and
+    `mfc.algorithms.lq.reinforce_step` for LQ. `theta` must require grad.
+    Returns shape (T,2).
     """
     out = env.rollout(theta, lam, B, generator=generator)
     X, alpha, mu_hat = out["X"], out["alpha"], out["mu_hat"]
-    running_cost, terminal_cost = out["running_cost"], out["terminal_cost"]
-
-    cost_to_go = torch.flip(torch.cumsum(torch.flip(running_cost, [0]), dim=0), [0]) + terminal_cost.unsqueeze(0)  # (T,B)
+    terminal_reward = X[-1] - env.config.chi * (X[-1] - mu_hat[-1]) ** 2  # (B,)
 
     tau = env.config.tau
-    means = theta[:, 0:1] * X[:-1] + theta[:, 1:2] * mu_hat[:-1].unsqueeze(-1)  # (T,B)
+    means = theta[:, 0:1] * (X[:-1] - mu_hat[:-1].unsqueeze(-1)) + theta[:, 1:2]  # (T,B)
     log_probs = -0.5 * ((alpha - means) / tau) ** 2  # additive normalizing constant doesn't depend on theta
 
-    surrogate = (log_probs * cost_to_go.detach()).sum()
+    surrogate = (log_probs.sum(dim=0) * terminal_reward.detach()).sum()
     (g_hat,) = torch.autograd.grad(surrogate, theta)
     return g_hat / B
 
@@ -82,18 +85,16 @@ def train(
     progress_desc: str | None = None,
 ) -> dict:
     """
-    Train theta by gradient descent on J^lambda(theta) (`algorithm=
+    Train theta by gradient ASCENT on J^lambda(theta) (`algorithm=
     "exact_gradient"`, using the closed-form `env.exact_gradient`, no
     sampling) or on its classical-REINFORCE MC estimate (`algorithm=
     "reinforce"`, needs `B`). Validates every `validate_every` steps by
     computing the exact unperturbed objective J^0(theta) — exact and free
-    (no Monte Carlo error: `mfc.environments.lq.LQ.exact_objective` is
-    closed-form), unlike every other benchmark's validation. Returns
+    (no Monte Carlo error), same as `mfc.algorithms.lq.train`. Returns
     theta_final, theta_history, validation_iterations, validation_J,
-    elapsed_seconds — the same fields `scripts/train.py`'s discrete
-    `train_run` returns, so `scripts/test.py`/notebooks can treat LQ runs
-    uniformly. `progress_desc` labels a live progress bar over the training
-    iterations (None disables it); see `mfc.progress`.
+    elapsed_seconds — the same fields `mfc.algorithms.lq.train` returns.
+    `progress_desc` labels a live progress bar over the training iterations
+    (None disables it); see `mfc.progress`.
     """
     if algorithm not in ("exact_gradient", "reinforce"):
         raise ValueError(f"unknown algorithm {algorithm!r}; available: exact_gradient, reinforce")
@@ -114,7 +115,7 @@ def train(
                 g_hat = reinforce_step(env, theta, lam, B, generator=generator)
 
             optimizer.zero_grad()
-            theta.grad = g_hat
+            theta.grad = -g_hat  # reward maximization: ascend
             optimizer.step()
             theta_history.append(theta.detach().clone())
 

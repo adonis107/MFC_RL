@@ -41,7 +41,7 @@ for path in (SRC, ROOT):
 
 import torch
 
-from mfc.algorithms import simplex
+from mfc.algorithms import mfreinforce, simplex
 from mfc.environments.advertising import Advertising
 from mfc.environments.cybersecurity import CyberSecurity
 from mfc.environments.distribution_planning import DistributionPlanning
@@ -353,6 +353,159 @@ def perturbation_coverage(mu_samples: torch.Tensor, lam: float, sigma: float, n_
         tv = 0.5 * (M - mu).abs().sum(dim=-1)
         results.append({"mu": mu, "mean_dTV": tv.mean(), "max_dTV": tv.max(), "within_bound": bool((tv <= lam + 1e-9).all())})
     return results
+
+
+def logit_perturbation_coverage(mu_samples: torch.Tensor, epsilon: float, n_samples: int, *, generator=None) -> list[dict]:
+    """
+    For each mu in mu_samples (shape (K, n_states)), sample n_samples draws
+    of M^epsilon=softmax(log(mu)+epsilon*Lambda), Lambda~N(0,I_N)
+    (`mfc.algorithms.mfreinforce._perturbed_law`) and report d_TV(M^epsilon,mu)
+    stats. Unlike the simplex perturbation's almost-sure d_TV<=lambda bound,
+    mfreinforce's logit perturbation only satisfies a bound *in expectation*
+    (files/Discrete RL - Meunier, Pham, Reisinger.md, Lemma 2.2:
+    E[d_TV(mu,mu_epsilon)]<=epsilon/2, via Pinsker's inequality against the
+    perturbation's KL divergence) — individual draws can and do exceed
+    epsilon/2, so `within_bound` here checks the *sampled mean*, not (as for
+    `perturbation_coverage`'s almost-sure bound) every single draw.
+    """
+    N = mu_samples.shape[-1]
+    dtype, device = mu_samples.dtype, mu_samples.device
+    results = []
+    for mu in mu_samples:
+        Lambda = torch.randn(n_samples, N, dtype=dtype, device=device, generator=generator)
+        M = mfreinforce._perturbed_law(mu, Lambda, epsilon)
+        tv = 0.5 * (M - mu).abs().sum(dim=-1)
+        results.append({"mu": mu, "mean_dTV": tv.mean(), "max_dTV": tv.max(), "within_bound": bool(tv.mean() <= epsilon / 2 + 1e-9)})
+    return results
+
+
+# --------------------------------------------------------------------------
+# Population-flow sensitivity D_t^theta(k) = grad_theta mu_t^theta(k):
+# exact value, model-free estimator, and the resulting oracle-D gradient
+# --------------------------------------------------------------------------
+
+
+def exact_sensitivity_flow(env, action_probs_fn, theta: torch.Tensor, mu0: torch.Tensor, T: int) -> torch.Tensor:
+    """
+    D_t^theta(k) = grad_theta mu_t^theta(k), t=0,...,T, k=1,...,N-1, via
+    ordinary autograd through the differentiable exact population flow
+    (`simplex.exact_population_flow(..., detach=False)`). Ground truth for
+    `simplex.estimate_sensitivity_flow`'s single-batch forward estimator
+    (discrete_state_space(2).tex, "Model-free estimation of the
+    population-flow sensitivities"). Returns shape (T+1, N-1, D).
+    """
+    theta = theta.detach().requires_grad_(True)
+    mu_flow = simplex.exact_population_flow(env, action_probs_fn, theta, mu0, T, detach=False)
+    N = env.n_states
+    rows = []
+    for t in range(T + 1):
+        cols = [torch.autograd.grad(mu_flow[t, k], theta, retain_graph=True)[0] for k in range(N - 1)]
+        rows.append(torch.stack(cols))
+    return torch.stack(rows).detach()
+
+
+def sensitivity_estimation_error(
+    env, action_probs_fn, theta: torch.Tensor, mu0: torch.Tensor, T: int, *, eta: float, n: int, sigma: float, reps: int, generator=None
+) -> dict:
+    """
+    Empirical bias/variance of `simplex.estimate_sensitivity_flow`'s
+    single-batch forward estimator D_hat_t(k) against the exact D_t^theta(k)
+    (`exact_sensitivity_flow`), from `reps` independent auxiliary batches at
+    fixed (eta, n). Validates the sensitivity-estimation assumption
+    (discrete_state_space(2).tex, "Bias and mean-squared error of the
+    gradient estimator"): A_eta := sup|D_t^eta,theta - D_t^theta| should
+    shrink with eta, and V_eta/n := the residual Monte Carlo variance should
+    shrink with n. Returns per-(t,k) `bias_norm` and `variance` (each shape
+    (T+1, N-1)) plus a scalar `mse` averaged over reps.
+
+    Accumulates a running sum/sum-of-squares across reps rather than
+    `torch.stack`-ing every draw: each draw has shape (T+1, N-1, D), and for
+    a large policy network (D in the tens of thousands, e.g.
+    distribution_planning's ~76.6k-parameter MLP) stacking hundreds of reps
+    materializes a multi-GB tensor and reliably OOMs a modest GPU, even
+    though the final statistics only need reps-many scalars' worth of
+    aggregation.
+    """
+    theta = theta.detach()
+    mu_flow = simplex.exact_population_flow(env, action_probs_fn, theta, mu0, T)
+    exact = exact_sensitivity_flow(env, action_probs_fn, theta, mu0, T)
+
+    total = torch.zeros_like(exact)
+    total_sq = torch.zeros_like(exact)
+    for _ in range(reps):
+        sample = simplex.estimate_sensitivity_flow(env, action_probs_fn, theta, mu_flow, mu0, T, n, eta, sigma, generator=generator)
+        total += sample
+        total_sq += sample**2
+
+    mean = total / reps
+    bias_norm = (mean - exact).norm(dim=-1)
+    # Population (ddof=0) variance from the running moments, so that
+    # mse = bias_norm**2 + variance holds exactly (E[(X-c)^2] = Var(X) + (E[X]-c)^2).
+    variance = (total_sq / reps - mean**2).clamp_min(0.0).sum(dim=-1)
+    mse = bias_norm**2 + variance
+    # Delta-method standard error of bias_norm itself (a norm of an
+    # approximately-Gaussian reps-averaged mean): SE(||mean-exact||) ~=
+    # sqrt(sum_i Var(mean_i)) = sqrt(variance/reps), reported so callers can
+    # tell a genuine A_eta signal from residual finite-reps noise in the mean.
+    bias_se = (variance / reps).sqrt()
+    return {"bias_norm": bias_norm, "bias_se": bias_se, "variance": variance, "mse": mse}
+
+
+def oracle_gradient_estimate(
+    env, action_probs_fn, theta: torch.Tensor, mu0: torch.Tensor, T: int, *, lam: float, sigma: float, B: int, gamma: float = 1.0, generator=None
+) -> torch.Tensor:
+    """
+    One sample of the oracle-D plug-in gradient estimator
+    ghat_{B,lambda}^orc(theta) (discrete_state_space(2).tex, Proposition
+    "Mean of the main-batch estimator"): `simplex.gradient_estimate` fed the
+    *exact* sensitivity flow (`exact_sensitivity_flow`) instead of the
+    auxiliary plug-in estimate. Since E[ghat^orc] = grad J^lambda(theta)
+    exactly, averaging many reps and comparing to `exact_gradient` (= grad
+    J(theta)) isolates the perturbation-bias term (III) of the estimator's
+    bias decomposition from the sensitivity-estimation term (II), which
+    `gradient_diagnostics`'s ordinary plug-in samples mix together.
+    """
+    theta = theta.detach()
+    mu_flow = simplex.exact_population_flow(env, action_probs_fn, theta, mu0, T)
+    D_exact = exact_sensitivity_flow(env, action_probs_fn, theta, mu0, T)
+    return simplex.gradient_estimate(env, action_probs_fn, theta, mu_flow, mu0, D_exact, T, B, lam, sigma, gamma=gamma, generator=generator)
+
+
+# --------------------------------------------------------------------------
+# Stability of the perturbed state marginal: d_TV(nu_t^{lambda,theta}, mu_t^theta)
+# --------------------------------------------------------------------------
+
+
+def state_marginal_stability(
+    env, action_probs_fn, theta: torch.Tensor, mu0: torch.Tensor, T: int, *, lam: float, sigma: float, n_samples: int, generator=None
+) -> torch.Tensor:
+    """
+    Empirical d_TV(nu_t^{lambda,theta}, mu_t^theta), t=0,...,T, where
+    nu_t^{lambda,theta} := Law(X_t^{lambda,theta}) is estimated from
+    n_samples independent lambda-perturbed trajectories (fresh q_t at every
+    step, as in `simplex.estimate_objective`) and mu_t^theta is the exact
+    nominal flow. Validates the Lemma "Stability of the state marginal"
+    (discrete_state_space(2).tex): d_TV(nu_t,mu_t) <= L_K*lambda*t. Returns
+    shape (T+1,).
+    """
+    theta = theta.detach()
+    device, dtype = theta.device, theta.dtype
+    N = env.n_states
+    mu_flow = simplex.exact_population_flow(env, action_probs_fn, theta, mu0, T)
+
+    states = torch.multinomial(mu0.expand(n_samples, N), 1, generator=generator).reshape(n_samples)
+    tv = torch.zeros(T + 1, dtype=dtype, device=device)
+    counts0 = torch.bincount(states, minlength=N).to(dtype) / n_samples
+    tv[0] = 0.5 * (counts0 - mu_flow[0]).abs().sum()
+    for t in range(T):
+        mu_t = mu_flow[t]
+        _, q = simplex.sample_perturbation(N, (n_samples,), sigma, dtype=dtype, device=device, generator=generator)
+        M = (1.0 - lam) * mu_t + lam * q
+        actions = simplex.sample_actions(action_probs_fn, theta, t, states, M, generator=generator)
+        states = env.sample_next_states(states, actions, M, generator=generator)
+        counts = torch.bincount(states, minlength=N).to(dtype) / n_samples
+        tv[t + 1] = 0.5 * (counts - mu_flow[t + 1]).abs().sum()
+    return tv
 
 
 # --------------------------------------------------------------------------

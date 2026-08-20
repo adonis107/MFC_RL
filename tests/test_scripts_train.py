@@ -7,7 +7,7 @@ from configs.lq import SMOKE as LQ_SMOKE
 from configs.twostate import MAIN as TWOSTATE_MAIN
 from configs.twostate import SMOKE as TWOSTATE_SMOKE
 from configs.twostate import TwoStateRunConfig
-from scripts.train import experiment_tag, list_experiments, list_lq_experiments, materialize_duplicates, run_all
+from scripts.train import experiment_tag, list_continuous_experiments, list_experiments, materialize_duplicates, run_all
 
 
 def test_list_experiments_with_no_overrides_reproduces_the_full_config_grid():
@@ -91,13 +91,13 @@ def test_list_experiments_dedups_budget_mode_invariant_algorithm():
     }
 
 
-def test_list_lq_experiments_override_semantics():
-    experiments = list_lq_experiments(LQ_SMOKE, lam=0.1, seed=2)
+def test_list_continuous_experiments_override_semantics():
+    experiments = list_continuous_experiments(LQ_SMOKE, lam=0.1, seed=2)
     assert len(experiments) == 1
     T, lam, seed = experiments[0]
     assert lam == 0.1 and seed == 2 and T == LQ_SMOKE.horizons[0]
 
-    full = list_lq_experiments(LQ_SMOKE)
+    full = list_continuous_experiments(LQ_SMOKE)
     assert len(full) == len(LQ_SMOKE.horizons) * len(LQ_SMOKE.lambdas) * len(LQ_SMOKE.seeds)
 
 
@@ -162,3 +162,25 @@ def test_materialize_duplicates_skips_when_primary_not_yet_trained(tmp_path, mon
     copied = materialize_duplicates("twostate", "mfreinforce", "smoke", output_dir=str(tmp_path))
     assert copied == []
     assert list((tmp_path / "twostate" / "smoke").glob("*.pt")) == []
+
+
+def test_train_run_theta_history_is_capped_and_off_device(tmp_path, monkeypatch):
+    """Regression test for a real OOM: `theta_history` used to append every
+    iterate on the training device, so a large policy (distribution planning's
+    MLP has D~7.7e4) at the reference's n_train=100_000 accumulated ~28.5 GiB
+    of GPU memory over a run and starved the gradient step itself."""
+    from scripts.train import CONFIGS, MAX_THETA_SNAPSHOTS
+
+    n_train = 4 * MAX_THETA_SNAPSHOTS + 3  # forces a stride > 1, and a final iterate off the stride
+    cfg = TwoStateRunConfig(name="test", seeds=(0,), horizons=(2,), lambdas=(0.2,), n_train=n_train, validate_every=n_train)
+    monkeypatch.setitem(CONFIGS["twostate"], "smoke", cfg)
+
+    [result] = run_all("twostate", "simplex", "smoke", output_dir=str(tmp_path))
+    history, iterations = result["theta_history"], result["theta_history_iterations"]
+
+    assert history.shape[0] <= MAX_THETA_SNAPSHOTS + 1  # capped, not one row per iterate
+    assert history.shape[0] == iterations.numel()
+    assert history.device.type == "cpu"  # never occupies accelerator memory
+    assert iterations[0].item() == 0 and iterations[-1].item() == n_train  # endpoints always kept
+    assert torch.equal(history[0], result["theta0"].cpu())
+    assert torch.equal(history[-1], result["theta_final"].cpu())

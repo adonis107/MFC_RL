@@ -44,7 +44,17 @@ cd "$(dirname "$0")/.."
 JOB_COUNT="$(uv run python scripts/train.py "$@" --list | wc -l)"
 echo "scheduling $JOB_COUNT job(s) across $WORKERS worker(s): $*" >&2
 
-uv run python scripts/train.py "$@" --list | xargs -d '\n' -P "$WORKERS" -I CMD bash -c CMD
+# Every worker inherits this terminal, so with more than one of them the
+# per-run progress bars would redraw over each other into noise (and each
+# job's stderr is still a tty, so train.py's own "auto" cannot detect it —
+# see src/mfc/progress.py). Workers fall back to their one-line-per-job
+# "done in ...s" output, which interleaves cleanly.
+PROGRESS_ARG=""
+if [ "$WORKERS" -gt 1 ]; then
+  PROGRESS_ARG=" --progress off"
+fi
+
+uv run python scripts/train.py "$@" --list | xargs -d '\n' -P "$WORKERS" -I CMD bash -c "CMD$PROGRESS_ARG"
 
 echo "materializing any budget-mode-invariant duplicates..." >&2
 uv run python scripts/train.py "$@" --materialize-duplicates

@@ -209,10 +209,10 @@ def plot_gradient_diagnostics(gd_by_lambda: dict[float, dict], *, component_labe
 
 def plot_theta_diagnostics(theta_by_lambda: dict[float, dict], *, optimal_theta=None, component_labels=None, ax=None):
     """
-    Learned theta (mean ± std across seeds) vs. lambda (context.md: "theta
-    bias, variance"). `theta_by_lambda`: {lam:
-    `scripts.test.theta_diagnostics(...)` dict}. `optimal_theta`, if given,
-    drawn as a per-component reference line.
+    Learned theta (mean +/- std across seeds) vs. lambda. `theta_by_lambda`:
+    {lam: `scripts.test.theta_diagnostics(...)` dict}. `optimal_theta`, if
+    given, drawn as a per-component dashed reference line, labeled
+    "{component} (optimal)" in the legend.
     """
     fig, ax = _fig_ax(ax)
     lambdas = sorted(theta_by_lambda)
@@ -225,7 +225,7 @@ def plot_theta_diagnostics(theta_by_lambda: dict[float, dict], *, optimal_theta=
         color = color_for(i)
         ax.errorbar(lambdas, mean, yerr=std, color=color, linewidth=2, marker="o", markersize=6, capsize=3, label=labels[i])
         if optimal_theta is not None:
-            ax.axhline(optimal_theta[i].item(), color=color, linestyle="--", linewidth=1.5, alpha=0.7)
+            ax.axhline(optimal_theta[i].item(), color=color, linestyle="--", linewidth=1.5, alpha=0.7, label=f"{labels[i]} (optimal)")
 
     apply_style(ax, xlabel="λ", ylabel="learned θ (mean ± std across seeds)")
     style_legend(ax)

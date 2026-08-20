@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 
+import pytest
 import torch
 
 from mfc.algorithms import _common, mfreinforce
@@ -189,3 +190,52 @@ def test_train_improves_training_objective():
     J_after = _common.exact_objective(env, env.policy_probs, theta_final, mu0, T)
 
     assert J_after > J_before
+
+
+@pytest.mark.parametrize("T,gamma,use_baseline", [(3, 1.0, False), (3, 0.9, True), (1, 1.0, True), (0, 1.0, False)])
+def test_gradient_estimate_matches_the_literal_formula(T, gamma, use_baseline):
+    """`mfreinforce.gradient_estimate` accumulates into one (D,) vector
+    instead of materializing the (T,B,D)/(T+1,B,D) score tensors (see
+    `simplex.gradient_estimate`'s docstring for the two rearrangements).
+    Driven from the same random stream it must reproduce the literal
+    transcription of eq. 2.6, not merely match it in law."""
+    env = TwoState()
+    theta = torch.tensor([0.3, -0.4])
+    mu0 = torch.tensor([0.8, 0.2])
+    N, D = env.n_states, theta.numel()
+    B, epsilon = 32, 0.5
+    baseline = torch.linspace(-1.0, 1.0, T + 1) if use_baseline else torch.zeros(T + 1)
+
+    mu_flow = _common.exact_population_flow(env, env.policy_probs, theta, mu0, T)
+    D_hat = mfreinforce.estimate_logit_sensitivity_flow(
+        env, env.policy_probs, theta, mu_flow, mu0, T, 8, epsilon, generator=torch.Generator(device=torch.get_default_device()).manual_seed(0)
+    )
+
+    gen = torch.Generator(device=torch.get_default_device()).manual_seed(1)
+    states = torch.multinomial(mu0.expand(B, N), 1, generator=gen).reshape(B)
+    rewards, L, Q = torch.zeros(T, B), torch.zeros(T, B, D), torch.zeros(T + 1, B, D)
+    terminal_reward = None
+    for t in range(T + 1):
+        Lambda = torch.randn(B, N, generator=gen)
+        M = mfreinforce._perturbed_law(mu_flow[t], Lambda, epsilon)
+        Q[t] = (Lambda @ D_hat[t]) / epsilon
+        if t < T:
+            actions = _common.sample_actions(env.policy_probs, theta, t, states, M, generator=gen)
+            L[t] = _common.policy_score(env.policy_probs, theta, t, states, actions, M)
+            rewards[t] = env.reward(states, actions, M)
+            states = env.sample_next_states(states, actions, M, generator=gen)
+        else:
+            terminal_reward = env.terminal_reward(states, M)
+    G = torch.zeros(T + 1, B)
+    G[T] = (gamma**T) * terminal_reward
+    for t in range(T - 1, -1, -1):
+        G[t] = (gamma**t) * rewards[t] + G[t + 1]
+    weighted = Q * (G - baseline.view(-1, 1)).unsqueeze(-1)
+    weighted[:T] = weighted[:T] + L * (G[:T] - baseline[:T].view(-1, 1)).unsqueeze(-1)
+    expected = weighted.sum(dim=(0, 1)) / B
+
+    actual = mfreinforce.gradient_estimate(
+        env, env.policy_probs, theta, mu_flow, mu0, D_hat, T, B, epsilon,
+        gamma=gamma, baseline=baseline, generator=torch.Generator(device=torch.get_default_device()).manual_seed(1),
+    )
+    assert torch.allclose(actual, expected, rtol=1e-11, atol=1e-13)

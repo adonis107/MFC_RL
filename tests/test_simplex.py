@@ -3,6 +3,7 @@ from __future__ import annotations
 import functools
 
 import numpy as np
+import pytest
 import torch
 
 from mfc.algorithms import simplex as sx
@@ -296,3 +297,69 @@ def test_train_improves_training_objective():
     J_after = exact_J(theta_final, mu0)
 
     assert J_after > J_before
+
+
+def _literal_gradient_estimate(env, action_probs_fn, theta, mu_flow, mu0, D_hat, T, B, lam, sigma, *, gamma, baseline, generator):
+    """Word-for-word transcription of eq. discrete-plugin-gradient-estimator:
+    build the full (T,B,D) / (T+1,B,D) score tensors, weight by G_t - b_t and
+    sum. This is what `sx.gradient_estimate` computed before it was rewritten
+    to accumulate into a single (D,) vector; kept here as the reference the
+    two exact rearrangements documented in its docstring (contracting Q_t's
+    rank-(N-1) structure, and the running score sum C_t) are checked against."""
+    device, dtype = theta.device, theta.dtype
+    N, D = env.n_states, theta.numel()
+
+    states = torch.multinomial(mu0.expand(B, N), 1, generator=generator).reshape(B)
+    rewards = torch.zeros(T, B, dtype=dtype, device=device)
+    L = torch.zeros(T, B, D, dtype=dtype, device=device)
+    Q = torch.zeros(T + 1, B, D, dtype=dtype, device=device)
+    terminal_reward = None
+
+    for t in range(T + 1):
+        mu_t = mu_flow[t]
+        U, q = sx.sample_perturbation(N, (B,), sigma, dtype=dtype, device=device, generator=generator)
+        M = (1.0 - lam) * mu_t + lam * q
+        H = sx.perturbation_score(U, q, sigma)
+        Q[t] = -((1.0 - lam) / lam) * (H @ D_hat[t])
+        if t < T:
+            actions = sx.sample_actions(action_probs_fn, theta, t, states, M, generator=generator)
+            L[t] = sx.policy_score(action_probs_fn, theta, t, states, actions, M)
+            rewards[t] = env.reward(states, actions, M)
+            states = env.sample_next_states(states, actions, M, generator=generator)
+        else:
+            terminal_reward = env.terminal_reward(states, M)
+
+    G = torch.zeros(T + 1, B, dtype=dtype, device=device)
+    G[T] = (gamma**T) * terminal_reward
+    for t in range(T - 1, -1, -1):
+        G[t] = (gamma**t) * rewards[t] + G[t + 1]
+
+    weighted = Q * (G - baseline.view(-1, 1)).unsqueeze(-1)
+    weighted[:T] = weighted[:T] + L * (G[:T] - baseline[:T].view(-1, 1)).unsqueeze(-1)
+    return weighted.sum(dim=(0, 1)) / B
+
+
+@pytest.mark.parametrize("T,gamma,use_baseline", [(3, 1.0, False), (3, 0.9, True), (1, 1.0, True), (0, 1.0, False)])
+def test_gradient_estimate_matches_the_literal_formula(T, gamma, use_baseline):
+    """`sx.gradient_estimate` accumulates into one (D,) vector instead of
+    materializing the (T,B,D)/(T+1,B,D) score tensors — several GB per step
+    at distribution planning's D~7.7e4. The rearrangement must stay exact:
+    driven from the same random stream it has to reproduce the literal
+    formula bit-for-bit (up to float associativity), not merely in law."""
+    env = TwoState()
+    theta = torch.tensor([0.3, -0.4])
+    mu0 = torch.tensor([0.8, 0.2])
+    B, lam, sigma = 32, 0.4, 1.0
+    baseline = torch.linspace(-1.0, 1.0, T + 1) if use_baseline else torch.zeros(T + 1)
+
+    mu_flow = sx.exact_population_flow(env, env.policy_probs, theta, mu0, T)
+    D_hat = sx.estimate_sensitivity_flow(
+        env, env.policy_probs, theta, mu_flow, mu0, T, n=8, eta=lam, sigma=sigma,
+        generator=torch.Generator(device=torch.get_default_device()).manual_seed(0),
+    )
+    args = (env, env.policy_probs, theta, mu_flow, mu0, D_hat, T, B, lam, sigma)
+    kwargs = dict(gamma=gamma, baseline=baseline)
+
+    expected = _literal_gradient_estimate(*args, **kwargs, generator=torch.Generator(device=torch.get_default_device()).manual_seed(1))
+    actual = sx.gradient_estimate(*args, **kwargs, generator=torch.Generator(device=torch.get_default_device()).manual_seed(1))
+    assert torch.allclose(actual, expected, rtol=1e-11, atol=1e-13)

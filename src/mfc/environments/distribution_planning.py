@@ -142,15 +142,21 @@ class DistributionPlanning:
 
     def init_theta(self, *, generator: torch.Generator | None = None) -> torch.Tensor:
         """Flattened MLP parameters, PyTorch's default `nn.Linear`-style
-        init: each layer's weight and bias ~ U(-1/sqrt(fan_in), 1/sqrt(fan_in))."""
+        init: each layer's weight and bias ~ U(-1/sqrt(fan_in), 1/sqrt(fan_in)).
+        Drawn in float64 regardless of `self.dtype`, then cast down: `torch.rand`
+        consumes the generator's stream differently per dtype, so drawing
+        directly at `self.dtype` would give a float32 run a *different* random
+        theta0 than a float64 run at the same seed, not just a lower-precision
+        copy of the same one — silently invalidating any float32-vs-float64
+        comparison run at the same INIT_SEED (scripts/train.py)."""
         chunks = []
         for w_shape, b_shape in self._mlp_shapes():
             fan_in = w_shape[1]
             bound = fan_in**-0.5
-            w = (torch.rand(w_shape, dtype=self.dtype, device=self.device, generator=generator) * 2 - 1) * bound
-            b = (torch.rand(b_shape, dtype=self.dtype, device=self.device, generator=generator) * 2 - 1) * bound
-            chunks.append(w.reshape(-1))
-            chunks.append(b)
+            w = (torch.rand(w_shape, dtype=torch.float64, device=self.device, generator=generator) * 2 - 1) * bound
+            b = (torch.rand(b_shape, dtype=torch.float64, device=self.device, generator=generator) * 2 - 1) * bound
+            chunks.append(w.reshape(-1).to(self.dtype))
+            chunks.append(b.to(self.dtype))
         return torch.cat(chunks)
 
     def sample_mu0(self, batch_shape: tuple[int, ...] = (), *, generator: torch.Generator | None = None) -> torch.Tensor:

@@ -79,6 +79,18 @@ def test_init_theta_has_expected_parameter_count():
     assert theta.numel() == expected
 
 
+def test_init_theta_is_dtype_invariant_at_the_same_seed():
+    """Regression test for a real bug: drawing the random init directly at
+    `self.dtype` gave float32 and float64 runs at the *same* seed unrelated
+    random theta0s (torch.rand consumes the generator's stream differently
+    per dtype), silently invalidating any float32-vs-float64 comparison."""
+    env64 = DistributionPlanning(dtype=torch.float64, device="cpu")
+    env32 = DistributionPlanning(dtype=torch.float32, device="cpu")
+    theta64 = env64.init_theta(generator=torch.Generator(device="cpu").manual_seed(0))
+    theta32 = env32.init_theta(generator=torch.Generator(device="cpu").manual_seed(0))
+    assert torch.allclose(theta64, theta32.double(), atol=1e-6)
+
+
 def test_sample_mu0_is_a_valid_distribution_with_full_support():
     env = DistributionPlanning()
     generator = torch.Generator(device=env.device).manual_seed(0)

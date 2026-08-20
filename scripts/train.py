@@ -19,6 +19,14 @@ SUPPORTED_BUDGET_MODES/SUPPORTED_FLOWS by argparse's `choices=`; `--T`/`--lam`/
 `--seed` accept any value, e.g. an extra seed beyond the config's own — see
 `list_experiments`); omitted axes still sweep the full config grid, so
 `run_all`'s old whole-config behavior is every one of these omitted.
+`--progress auto|on|off` controls the per-run progress bar over training
+iterations (annotated with the latest validation objective). "auto" draws one
+for a terminal or notebook but not into a redirected log; it cannot tell that
+sibling workers are sharing a terminal, so `train_all.sh` passes `--progress
+off` whenever it schedules more than one worker — see `mfc.progress`. Either
+way each job prints one self-contained `... started` / `... done in ...` line,
+so a parallel run's output stays readable.
+
 `--dtype float32` switches training precision (every `mfc.environments.*`
 class defaults to float64); always compare a `smoke` run in both dtypes
 (objectives, policy error, theta) before trusting float32 for a paid `main`
@@ -96,15 +104,20 @@ from configs.distribution_planning import SMOKE as DISTRIBUTION_PLANNING_SMOKE
 from configs.lq import MAIN as LQ_MAIN
 from configs.lq import MID as LQ_MID
 from configs.lq import SMOKE as LQ_SMOKE
+from configs.portfolio import MAIN as PORTFOLIO_MAIN
+from configs.portfolio import MID as PORTFOLIO_MID
+from configs.portfolio import SMOKE as PORTFOLIO_SMOKE
 from configs.twostate import MAIN as TWOSTATE_MAIN
 from configs.twostate import MID as TWOSTATE_MID
 from configs.twostate import SMOKE as TWOSTATE_SMOKE
-from mfc.algorithms import _common, lq as lq_algorithms, mfreinforce, reinforce, simplex
+from mfc.algorithms import _common, lq as lq_algorithms, mfreinforce, portfolio as portfolio_algorithms, reinforce, simplex
 from mfc.environments.advertising import Advertising
 from mfc.environments.cybersecurity import CyberSecurity
 from mfc.environments.distribution_planning import DistributionPlanning
 from mfc.environments.lq import LQ
+from mfc.environments.portfolio import Portfolio
 from mfc.environments.twostate import TwoState
+from mfc.progress import PROGRESS_MODES, progress_enabled, training_bar
 
 ENVIRONMENTS = {"twostate": TwoState, "cybersecurity": CyberSecurity, "distribution_planning": DistributionPlanning, "advertising": Advertising}
 CONFIGS = {
@@ -113,7 +126,16 @@ CONFIGS = {
     "distribution_planning": {"main": DISTRIBUTION_PLANNING_MAIN, "mid": DISTRIBUTION_PLANNING_MID, "smoke": DISTRIBUTION_PLANNING_SMOKE},
     "advertising": {"main": ADVERTISING_MAIN, "mid": ADVERTISING_MID, "smoke": ADVERTISING_SMOKE},
     "lq": {"main": LQ_MAIN, "mid": LQ_MID, "smoke": LQ_SMOKE},
+    "portfolio": {"main": PORTFOLIO_MAIN, "mid": PORTFOLIO_MID, "smoke": PORTFOLIO_SMOKE},
 }
+
+# Continuous-state environments (Gaussian/non-Gaussian scalar state, closed-form
+# gradient — see mfc.environments.lq's module docstring for why these can't
+# share the discrete ENVIRONMENTS/STEP_FACTORIES machinery above): each maps
+# to its (EnvironmentClass, algorithms module) pair, used generically by
+# `run_continuous`/`list_continuous_experiments` instead of one bespoke
+# runner per environment.
+CONTINUOUS_ENVIRONMENTS = {"lq": (LQ, lq_algorithms), "portfolio": (Portfolio, portfolio_algorithms)}
 
 SUPPORTED_BUDGET_MODES = {"equal_parameters", "equal_budget"}
 SUPPORTED_FLOWS = {"exact", "particle"}
@@ -128,6 +150,18 @@ ALGORITHMS_WITH_PERTURBATION_SCALE = {"simplex"}  # reinforce has no lambda; swe
 # call site is identical for all three). Each factory closes over (cfg, env)
 # and returns `sample(generator) -> mu0`.
 INIT_SEED = 0  # fixed, reused across all training seeds within a run, so paired runs share one policy initialization
+
+# Cap on the number of theta snapshots `train_run` keeps (evenly spaced over
+# training, always including iteration 0 and the final iterate). Storing every
+# iterate is fine for a small policy but not for a large one: distribution
+# planning's MLP has D~7.7e4 parameters, so at the reference's n_train=100_000
+# the full history is ~28.5 GiB in float32 — which, left on the training
+# device, fills a 24GB GPU on its own partway through a run. Snapshots are
+# also moved to CPU: nothing downstream (scripts/test.py, the notebooks) reads
+# `theta_history` at all — they use `theta_final`/`validation_J` — so it has no
+# business occupying accelerator memory, and its accompanying iteration indices
+# are saved as `theta_history_iterations`.
+MAX_THETA_SNAPSHOTS = 256
 
 
 def _twostate_mu0_sampler(cfg, env):
@@ -286,6 +320,7 @@ def train_run(
     T: int,
     lam: float | None,
     seed: int,
+    progress_desc: str | None = None,
 ) -> dict:
     """Run one (T, lam, seed) — lam is None for algorithms with no
     perturbation scale (see ALGORITHMS_WITH_PERTURBATION_SCALE) — randomizing
@@ -295,8 +330,15 @@ def train_run(
     "Training and validation protocol"), else at the same `T` used for
     training (twostate). Discounts by `env.config.gamma` when the
     environment defines one (else undiscounted, gamma=1.0). Returns
-    everything needed for downstream diagnostics: full theta trajectory and
-    validation history."""
+    everything needed for downstream diagnostics: the theta trajectory
+    (subsampled to MAX_THETA_SNAPSHOTS CPU-resident snapshots, indexed by
+    `theta_history_iterations`) and validation history.
+
+    `progress_desc` labels a live progress bar over the training iterations,
+    annotated with the most recent validation objective; None (the default)
+    disables it. Callers resolve whether to pass one via
+    `mfc.progress.progress_enabled` — see that module for why it is a
+    decision and not just an isatty check."""
     dtype, device = theta0.dtype, theta0.device
     generator = torch.Generator(device=device).manual_seed(seed)
     gamma = getattr(env.config, "gamma", 1.0)
@@ -307,20 +349,27 @@ def train_run(
     mu0_val = torch.tensor(cfg.mu0_val, dtype=dtype, device=device)
     sample_mu0 = SAMPLE_MU0_FACTORIES[env_name](cfg, env)
 
-    theta_history = [theta.detach().clone()]
+    history_stride = max(1, -(-cfg.n_train // MAX_THETA_SNAPSHOTS))  # ceil, so at most MAX_THETA_SNAPSHOTS+1 rows
+    theta_history = [theta.detach().to("cpu", copy=True)]
+    history_iterations = [0]
     val_iterations, val_J = [], []
 
     start = time.perf_counter()
-    for m in range(cfg.n_train):
-        g_hat = step_fn(env, action_probs_fn, theta, sample_mu0(generator), T=T, lam=lam, gamma=gamma, generator=generator)
-        optimizer.zero_grad()
-        theta.grad = -g_hat
-        optimizer.step()
-        theta_history.append(theta.detach().clone())
+    with training_bar(cfg.n_train, desc=progress_desc) as bar:
+        for m in bar:
+            g_hat = step_fn(env, action_probs_fn, theta, sample_mu0(generator), T=T, lam=lam, gamma=gamma, generator=generator)
+            optimizer.zero_grad()
+            theta.grad = -g_hat
+            optimizer.step()
 
-        if m % cfg.validate_every == 0 or m == cfg.n_train - 1:
-            val_iterations.append(m)
-            val_J.append(exact_objective(env, action_probs_fn, theta, mu0_val, T_val, gamma=gamma).item())
+            if (m + 1) % history_stride == 0 or m == cfg.n_train - 1:
+                theta_history.append(theta.detach().to("cpu", copy=True))
+                history_iterations.append(m + 1)
+
+            if m % cfg.validate_every == 0 or m == cfg.n_train - 1:
+                val_iterations.append(m)
+                val_J.append(exact_objective(env, action_probs_fn, theta, mu0_val, T_val, gamma=gamma).item())
+                bar.set_postfix_str(f"J={val_J[-1]:.4f}", refresh=False)
     elapsed = time.perf_counter() - start
 
     return {
@@ -336,6 +385,7 @@ def train_run(
         "theta0": theta0,
         "theta_final": theta.detach().clone(),
         "theta_history": torch.stack(theta_history),
+        "theta_history_iterations": torch.tensor(history_iterations),
         "validation_iterations": torch.tensor(val_iterations),
         "validation_J": torch.tensor(val_J, dtype=dtype),
         "elapsed_seconds": elapsed,
@@ -485,6 +535,7 @@ def run_all(
     lam: float | None = None,
     seed: int | None = None,
     overwrite: bool = False,
+    progress: str = "auto",
 ) -> list[dict]:
     """Train every job `list_experiments` returns for this (env, alg,
     config[, axis overrides]). A job whose output `.pt` already exists is
@@ -494,7 +545,8 @@ def run_all(
     ALGORITHMS_WITHOUT_BUDGET_MODE_DEPENDENCE) are materialized as copies
     afterward, in-process — `materialize_duplicates` only needs to be called
     separately when jobs were trained out-of-process (`--list` + a parallel
-    launcher, e.g. `train_all.sh`)."""
+    launcher, e.g. `train_all.sh`). `progress` is one of
+    `mfc.progress.PROGRESS_MODES` and controls the per-run progress bar."""
     if env_name not in ENVIRONMENTS:
         raise ValueError(f"unknown env {env_name!r}; available: {sorted(ENVIRONMENTS)}")
     if alg_name not in STEP_FACTORIES:
@@ -518,6 +570,7 @@ def run_all(
     out_root = Path(output_dir) / env_name / config_name
     out_root.mkdir(parents=True, exist_ok=True)
 
+    show_progress = progress_enabled(progress)
     step_fns: dict[tuple[str, str], object] = {}
     results = []
     for budget_mode_i, flow_i, T_i, lam_i, seed_i in experiments:
@@ -531,7 +584,16 @@ def run_all(
         if step_key not in step_fns:
             step_fns[step_key] = STEP_FACTORIES[alg_name](cfg, flow_i, budget_mode_i)
 
-        print(f"[{env_name}/{config_name}] {tag} ...", end=" ", flush=True)
+        # Every status line is self-contained (`<label> ... <status>`, as for
+        # "skipped" above) rather than a dangling "<label> ... " prefix that a
+        # later write completes: a bar would redraw over such a prefix, and
+        # under train_all.sh's concurrent workers the prefixes and their
+        # summaries interleave across processes into unreadable output. With a
+        # bar there is no need to announce the start at all — the bar is the
+        # announcement — so that line is only for the bar-less path.
+        label = f"[{env_name}/{config_name}] {tag}"
+        if not show_progress:
+            print(f"{label} ... started", flush=True)
         result = train_run(
             env,
             action_probs_fn,
@@ -545,8 +607,9 @@ def run_all(
             T=T_i,
             lam=lam_i,
             seed=seed_i,
+            progress_desc=tag if show_progress else None,
         )
-        print(f"done in {result['elapsed_seconds']:.1f}s, final validation J={result['validation_J'][-1].item():.4f}")
+        print(f"{label} ... done in {result['elapsed_seconds']:.1f}s, final validation J={result['validation_J'][-1].item():.4f}")
         torch.save(result, out_path)
         results.append(result)
 
@@ -558,17 +621,21 @@ def run_all(
     return results
 
 
-def list_lq_experiments(cfg, *, T: int | None = None, lam: float | None = None, seed: int | None = None) -> list[tuple[int, float, int]]:
-    """The full LQ experiment grid as (T, lam, seed) tuples, mirroring
-    `list_experiments`'s override semantics (any axis given here is pinned;
-    every omitted axis sweeps its full config range)."""
+def list_continuous_experiments(cfg, *, T: int | None = None, lam: float | None = None, seed: int | None = None) -> list[tuple[int, float, int]]:
+    """The full experiment grid for a CONTINUOUS_ENVIRONMENTS config, as
+    (T, lam, seed) tuples, mirroring `list_experiments`'s override
+    semantics (any axis given here is pinned; every omitted axis sweeps its
+    full config range). No budget_mode/flow axis: `mfc.algorithms.lq`/
+    `mfc.algorithms.portfolio`'s `"exact_gradient"` needs no sampling budget
+    at all, and `"reinforce"` needs only a single batch size `cfg.B`."""
     horizons = [T] if T is not None else list(cfg.horizons)
     lambdas = [lam] if lam is not None else list(cfg.lambdas)
     seeds = [seed] if seed is not None else list(cfg.seeds)
     return [(T_i, lam_i, s) for T_i in horizons for lam_i in lambdas for s in seeds]
 
 
-def run_lq(
+def run_continuous(
+    env_name: str,
     alg_name: str,
     config_name: str,
     *,
@@ -578,48 +645,59 @@ def run_lq(
     lam: float | None = None,
     seed: int | None = None,
     overwrite: bool = False,
+    progress: str = "auto",
 ) -> list[dict]:
     """
-    LQ's own runner, parallel to `run_all`/`train_run` but for
-    `mfc.algorithms.lq.train`'s closed-form/Monte-Carlo training instead of
-    the discrete STEP_FACTORIES machinery (see `mfc.environments.lq`'s
-    module docstring for why LQ cannot share that machinery: continuous
-    Gaussian state/policy, no `n_states`/`action_probs_fn`). Trained on CPU
-    regardless of CUDA availability — LQ's per-step work is all small
-    scalar/(T,B) ops, for which GPU kernel-launch overhead dominates (this
-    repo's twostate profiling found the same: GPU ~2.3x slower than CPU for
-    tiny-tensor workloads), confirmed directly while tuning `configs/lq.py`.
+    The runner shared by every CONTINUOUS_ENVIRONMENTS entry (`lq`,
+    `portfolio`) — parallel to `run_all`/`train_run` but for their
+    `algorithms.train`'s closed-form/Monte-Carlo training instead of the
+    discrete STEP_FACTORIES machinery (see `mfc.environments.lq`'s module
+    docstring for why: continuous Gaussian/non-Gaussian scalar state, no
+    `n_states`/`action_probs_fn`). Trained on CPU regardless of CUDA
+    availability — their per-step work is all small scalar/(T,B) ops, for
+    which GPU kernel-launch overhead dominates (this repo's twostate
+    profiling found the same: GPU ~2.3x slower than CPU for tiny-tensor
+    workloads), confirmed directly while tuning `configs/lq.py`.
     `T`/`lam`/`seed` pin one axis each to a single value (as in `run_all`);
     a job whose output `.pt` already exists is skipped unless `overwrite=True`.
+    `progress` is one of `mfc.progress.PROGRESS_MODES` and controls the
+    per-run progress bar, as in `run_all`.
     """
+    if env_name not in CONTINUOUS_ENVIRONMENTS:
+        raise ValueError(f"unknown continuous env {env_name!r}; available: {sorted(CONTINUOUS_ENVIRONMENTS)}")
     if alg_name not in ("exact_gradient", "reinforce"):
-        raise ValueError(f"unknown LQ algorithm {alg_name!r}; available: exact_gradient, reinforce")
-    cfg = CONFIGS["lq"][config_name]
+        raise ValueError(f"unknown {env_name} algorithm {alg_name!r}; available: exact_gradient, reinforce")
+    env_cls, algorithms_module = CONTINUOUS_ENVIRONMENTS[env_name]
+    cfg = CONFIGS[env_name][config_name]
     dtype_t = getattr(torch, dtype) if isinstance(dtype, str) else dtype
 
-    env = LQ(device="cpu", dtype=dtype_t)
-    out_root = Path(output_dir) / "lq" / config_name
+    env = env_cls(device="cpu", dtype=dtype_t)
+    out_root = Path(output_dir) / env_name / config_name
     out_root.mkdir(parents=True, exist_ok=True)
 
     dtype_tag = "" if dtype == "float64" else f"_dtype{dtype}"  # see run_all's identical dtype_tag: without this, a float32 job
     # would silently no-op as "already exists" against a float64 one saved at the same tag
+    show_progress = progress_enabled(progress)
     results = []
-    for T_i, lam_i, seed_i in list_lq_experiments(cfg, T=T, lam=lam, seed=seed):
+    for T_i, lam_i, seed_i in list_continuous_experiments(cfg, T=T, lam=lam, seed=seed):
         tag = f"{alg_name}_T{T_i}_lam{lam_i}_seed{seed_i}{dtype_tag}"
         out_path = out_root / f"{tag}.pt"
         if out_path.exists() and not overwrite:
-            print(f"[lq/{config_name}] {tag} ... skipped (already exists)")
+            print(f"[{env_name}/{config_name}] {tag} ... skipped (already exists)")
             continue
 
         theta0 = env.init_theta(T=T_i)
-        print(f"[lq/{config_name}] {tag} ...", end=" ", flush=True)
+        label = f"[{env_name}/{config_name}] {tag}"
+        if not show_progress:  # see run_all: self-contained status lines, the bar replaces the start announcement
+            print(f"{label} ... started", flush=True)
         generator = torch.Generator(device="cpu").manual_seed(seed_i)
-        result = lq_algorithms.train(
+        result = algorithms_module.train(
             env, theta0, algorithm=alg_name, n_train=cfg.n_train, lr=cfg.lr, lam=lam_i,
             B=cfg.B if alg_name == "reinforce" else None, validate_every=cfg.validate_every, generator=generator,
+            progress_desc=tag if show_progress else None,
         )
-        result.update({"env": "lq", "alg": alg_name, "T": T_i, "lam": lam_i, "seed": seed_i, "dtype": dtype, "config": cfg, "theta0": theta0})
-        print(f"done in {result['elapsed_seconds']:.1f}s, final validation J={result['validation_J'][-1].item():.4f}")
+        result.update({"env": env_name, "alg": alg_name, "T": T_i, "lam": lam_i, "seed": seed_i, "dtype": dtype, "config": cfg, "theta0": theta0})
+        print(f"{label} ... done in {result['elapsed_seconds']:.1f}s, final validation J={result['validation_J'][-1].item():.4f}")
         torch.save(result, out_path)
         results.append(result)
     return results
@@ -627,7 +705,7 @@ def run_lq(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--env", default="twostate", choices=sorted(set(ENVIRONMENTS) | {"lq"}))
+    parser.add_argument("--env", default="twostate", choices=sorted(set(ENVIRONMENTS) | set(CONTINUOUS_ENVIRONMENTS)))
     parser.add_argument("--alg", default="simplex", choices=sorted(set(STEP_FACTORIES) | {"exact_gradient"}))
     parser.add_argument("--config", default="smoke", choices=["main", "mid", "smoke"])
     parser.add_argument("--output-dir", default=str(ROOT / "runs"))
@@ -638,6 +716,11 @@ def main() -> None:
     parser.add_argument("--lam", type=float, default=None, help="pins the perturbation scale instead of sweeping the config's full grid")
     parser.add_argument("--seed", type=int, default=None, help="pins the seed instead of sweeping the config's full grid")
     parser.add_argument("--overwrite", action="store_true", help="retrain even if a job's output .pt already exists (default: skip it)")
+    parser.add_argument(
+        "--progress", default="auto", choices=list(PROGRESS_MODES),
+        help="per-run progress bar over training iterations: 'auto' (a terminal or notebook, but not a log file), or force 'on'/'off'. "
+             "Use 'off' when several jobs share one terminal — train_all.sh passes it for you (see mfc.progress)",
+    )
     parser.add_argument("--list", action="store_true", help="print every job needing real training as a runnable `uv run python scripts/train.py ...` command, one per line, instead of training (see train_all.sh)")
     parser.add_argument(
         "--materialize-duplicates", action="store_true",
@@ -649,8 +732,8 @@ def main() -> None:
     output_dir_flag = "" if args.output_dir == default_output_dir else f" --output-dir {args.output_dir}"
 
     if args.materialize_duplicates:
-        if args.env == "lq":
-            return  # LQ has no budget_mode axis; nothing to materialize
+        if args.env in CONTINUOUS_ENVIRONMENTS:
+            return  # no budget_mode axis; nothing to materialize
         materialize_duplicates(
             args.env, args.alg, args.config, output_dir=args.output_dir, dtype=args.dtype,
             budget_mode=args.budget_mode, flow=args.flow, T=args.T, lam=args.lam, seed=args.seed, overwrite=args.overwrite,
@@ -659,8 +742,8 @@ def main() -> None:
 
     if args.list:
         cfg = CONFIGS[args.env][args.config]
-        if args.env == "lq":
-            experiments = [(None, None, T_i, lam_i, seed_i) for T_i, lam_i, seed_i in list_lq_experiments(cfg, T=args.T, lam=args.lam, seed=args.seed)]
+        if args.env in CONTINUOUS_ENVIRONMENTS:
+            experiments = [(None, None, T_i, lam_i, seed_i) for T_i, lam_i, seed_i in list_continuous_experiments(cfg, T=args.T, lam=args.lam, seed=args.seed)]
         else:
             experiments, _duplicates, skipped_budget, skipped_flows = list_experiments(cfg, args.alg, budget_mode=args.budget_mode, flow=args.flow, T=args.T, lam=args.lam, seed=args.seed)
             if skipped_budget:
@@ -676,12 +759,16 @@ def main() -> None:
             print(f"uv run python scripts/train.py --env {args.env} --alg {args.alg} --config {args.config} --dtype {args.dtype}{axis_flags}{output_dir_flag}")
         return
 
-    if args.env == "lq":
-        run_lq(args.alg, args.config, output_dir=args.output_dir, dtype=args.dtype, T=args.T, lam=args.lam, seed=args.seed, overwrite=args.overwrite)
+    if args.env in CONTINUOUS_ENVIRONMENTS:
+        run_continuous(
+            args.env, args.alg, args.config, output_dir=args.output_dir, dtype=args.dtype,
+            T=args.T, lam=args.lam, seed=args.seed, overwrite=args.overwrite, progress=args.progress,
+        )
         return
     run_all(
         args.env, args.alg, args.config, output_dir=args.output_dir, dtype=args.dtype,
-        budget_mode=args.budget_mode, flow=args.flow, T=args.T, lam=args.lam, seed=args.seed, overwrite=args.overwrite,
+        budget_mode=args.budget_mode, flow=args.flow, T=args.T, lam=args.lam, seed=args.seed,
+        overwrite=args.overwrite, progress=args.progress,
     )
 
 
