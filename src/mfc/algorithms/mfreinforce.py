@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import torch
 
-from ._common import exact_population_flow, one_hot, policy_score, sample_actions
+from ._common import exact_population_flow, one_hot, policy_score, sample_actions, weighted_score_sum
 
 __all__ = ["estimate_logit_sensitivity_flow", "gradient_estimate", "gradient_step", "train"]
 
@@ -119,25 +119,23 @@ def gradient_estimate(
     (default) recovers the undiscounted estimator; see
     `_common.exact_objective`. Returns shape (D,).
 
-    Accumulated into one (D,) vector rather than through (T,B,D)/(T+1,B,D)
-    score buffers, by the same two exact rearrangements `simplex.gradient_estimate`
+    The (T,B,D)/(T+1,B,D) score buffers the formula suggests are never
+    built, by the same two exact rearrangements `simplex.gradient_estimate`
     documents in full: eps^{-1} Lambda_t . D_t is a rank-N product, so the
-    batch sum contracts the (N) axis before the (D) one and never forms a
-    (B,D) tensor; and the policy-score term is accumulated against a running
-    score sum C_t := sum_{s<=t} L_s. Same estimator, same random stream, a
-    fraction of the memory (which for a large policy is the whole cost of a
-    gradient step).
+    batch sum contracts the (N) axis before the (D) one; and the policy-score
+    term goes through `_common.weighted_score_sum`. Same estimator, same
+    random stream, a fraction of the memory (which for a large policy is the
+    whole cost of a gradient step).
     """
     device, dtype = theta.device, theta.dtype
-    N, D = env.n_states, theta.numel()
+    N = env.n_states
     baseline = torch.zeros(T + 1, dtype=dtype, device=device) if baseline is None else baseline
 
     states = torch.multinomial(mu0.expand(B, N), 1, generator=generator).reshape(B)
     rewards = torch.zeros(T, B, dtype=dtype, device=device)
     terminal_reward = torch.zeros(B, dtype=dtype, device=device)
     Lambdas = torch.zeros(T + 1, B, N, dtype=dtype, device=device)
-    C = torch.zeros(B, D, dtype=dtype, device=device)  # running score sum sum_{s<=t} L_s
-    g = torch.zeros(D, dtype=dtype, device=device)
+    steps = []
 
     for t in range(T + 1):
         mu_t = mu_flow[t]
@@ -147,23 +145,20 @@ def gradient_estimate(
 
         if t < T:
             actions = sample_actions(action_probs_fn, theta, t, states, M, generator=generator)
-            L = policy_score(action_probs_fn, theta, t, states, actions, M)  # (B, D)
-            C += L
-            g -= baseline[t] * L.sum(dim=0)
-            del L  # the step's largest tensor; drop it before the next one is built
+            steps.append((t, states, actions, M))
             rewards[t] = env.reward(states, actions, M)
-            g += (gamma**t) * (rewards[t] @ C)
             states = env.sample_next_states(states, actions, M, generator=generator)
         else:
             terminal_reward[:] = env.terminal_reward(states, M)
-            g += (gamma**T) * (terminal_reward @ C)  # C is C_{T-1} here
 
     G = torch.zeros(T + 1, B, dtype=dtype, device=device)
     G[T] = (gamma**T) * terminal_reward
     for t in range(T - 1, -1, -1):
         G[t] = (gamma**t) * rewards[t] + G[t + 1]
 
-    Lambda_weighted = torch.einsum("tb,tbn->tn", G - baseline.view(-1, 1), Lambdas)  # (T+1, N)
+    weights = G - baseline.view(-1, 1)  # (T+1, B)
+    g = weighted_score_sum(action_probs_fn, theta, steps, weights[:T])
+    Lambda_weighted = torch.einsum("tb,tbn->tn", weights, Lambdas)  # (T+1, N)
     g += torch.einsum("tn,tnd->d", Lambda_weighted, D_hat) / epsilon
     return g / B
 

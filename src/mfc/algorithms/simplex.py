@@ -23,7 +23,16 @@ from __future__ import annotations
 
 import torch
 
-from ._common import eval_batched, exact_objective, exact_population_flow, one_hot, particle_population_flow, policy_score, sample_actions
+from ._common import (
+    eval_batched,
+    exact_objective,
+    exact_population_flow,
+    one_hot,
+    particle_population_flow,
+    policy_score,
+    sample_actions,
+    weighted_score_sum,
+)
 
 __all__ = [
     "one_hot",
@@ -187,36 +196,33 @@ def gradient_estimate(
     sensitivity estimate `D_hat`. `gamma=1.0` (default) recovers the
     undiscounted estimator; see `_common.exact_objective`. Returns shape (D,).
 
-    Accumulated straight into one (D,) vector instead of materializing the
-    per-(t,b) score tensors: written literally, the estimator needs (T,B,D)
-    and (T+1,B,D) buffers for L_t and Q_t(D_t) plus same-sized temporaries
-    for the weight-and-sum, which at the distribution-planning benchmark's
-    D~7.7e4 and B=500 is several GB per gradient step — enough to OOM a
-    24GB card shared by a few concurrent training jobs. Two exact
-    rearrangements avoid them (the rollout, and hence the consumed random
-    stream, is untouched, so this is the same estimator sample-for-sample):
+    Written literally the estimator needs (T,B,D) and (T+1,B,D) buffers for
+    L_t and Q_t(D_t), plus same-sized temporaries to weight and sum them.
+    D is the whole policy, so those dominate a gradient step completely: at
+    distribution planning's D~7.7e4 they are several GB at B=500 and tens of
+    GB at the equal-budget B=15490. Neither is ever formed here. The rollout
+    is untouched — same trajectories, same random stream, same estimator
+    sample-for-sample — and only the contraction order changes:
 
-      - Q_t is never formed. It is a rank-(N-1) product
-        Q_t = -((1-λ)/λ) H_t D̂_t, so weighting it by w_t := G_t - b_t and
-        summing over the batch can contract the (N-1) axis first:
-        sum_b w_t^(b) Q_t^(b) = -((1-λ)/λ) (w_t^T H_t) D̂_t. Only the tiny
-        (T+1,B,N-1) block of perturbation scores is kept.
-      - L_t is consumed as it is produced, by swapping the two sums in
-        sum_{t<T} L_t G_t (with G_t = sum_{s>=t} γ^s r_s + γ^T g_T):
-            sum_{t<T} L_t G_t = sum_{t<T} (γ^t r_t) C_t + (γ^T g_T) C_{T-1},
-        where C_t := sum_{s<=t} L_s is a running score sum, available at
-        step t. Only C_t and the current L_t are ever live.
+      - Q_t is a rank-(N-1) product Q_t = -((1-λ)/λ) H_t D̂_t, so weighting
+        by w_t := G_t - b_t and summing over the batch can contract the
+        (N-1) axis first: sum_b w_t^(b) Q_t^(b) = -((1-λ)/λ) (w_t^T H_t) D̂_t.
+        Only the tiny (T+1,B,N-1) block of perturbation scores is kept.
+      - The L_t term is a score-weighted sum, so it goes through
+        `_common.weighted_score_sum`, which gets it from one scalar's
+        gradient instead of from (B,D) per-sample scores. That needs w_t up
+        front, hence the rollout records its (t, states, actions, M) steps
+        — a few MB of indices — and revisits them once G is known.
     """
     device, dtype = theta.device, theta.dtype
-    N, D = env.n_states, theta.numel()
+    N = env.n_states
     baseline = torch.zeros(T + 1, dtype=dtype, device=device) if baseline is None else baseline
 
     states = torch.multinomial(mu0.expand(B, N), 1, generator=generator).reshape(B)
     rewards = torch.zeros(T, B, dtype=dtype, device=device)
     terminal_reward = torch.zeros(B, dtype=dtype, device=device)
     H = torch.zeros(T + 1, B, N - 1, dtype=dtype, device=device)
-    C = torch.zeros(B, D, dtype=dtype, device=device)  # running score sum sum_{s<=t} L_s
-    g = torch.zeros(D, dtype=dtype, device=device)
+    steps = []
 
     for t in range(T + 1):
         mu_t = mu_flow[t]
@@ -226,23 +232,20 @@ def gradient_estimate(
 
         if t < T:
             actions = sample_actions(action_probs_fn, theta, t, states, M, generator=generator)
-            L = policy_score(action_probs_fn, theta, t, states, actions, M)  # (B, D)
-            C += L
-            g -= baseline[t] * L.sum(dim=0)
-            del L  # the step's largest tensor; drop it before the next one is built
+            steps.append((t, states, actions, M))
             rewards[t] = env.reward(states, actions, M)
-            g += (gamma**t) * (rewards[t] @ C)
             states = env.sample_next_states(states, actions, M, generator=generator)
         else:
             terminal_reward[:] = env.terminal_reward(states, M)
-            g += (gamma**T) * (terminal_reward @ C)  # C is C_{T-1} here
 
     G = torch.zeros(T + 1, B, dtype=dtype, device=device)
     G[T] = (gamma**T) * terminal_reward
     for t in range(T - 1, -1, -1):
         G[t] = (gamma**t) * rewards[t] + G[t + 1]
 
-    H_weighted = torch.einsum("tb,tbk->tk", G - baseline.view(-1, 1), H)  # (T+1, N-1)
+    weights = G - baseline.view(-1, 1)  # (T+1, B)
+    g = weighted_score_sum(action_probs_fn, theta, steps, weights[:T])
+    H_weighted = torch.einsum("tb,tbk->tk", weights, H)  # (T+1, N-1)
     g -= ((1.0 - lam) / lam) * torch.einsum("tk,tkd->d", H_weighted, D_hat)
     return g / B
 

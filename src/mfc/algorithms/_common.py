@@ -76,6 +76,40 @@ def policy_score(
     return scores.reshape(*states.shape, -1)
 
 
+def weighted_score_sum(action_probs_fn, theta: torch.Tensor, steps, weights: torch.Tensor) -> torch.Tensor:
+    """
+    sum_t sum_b w_t^(b) * grad_theta log pi_t^theta(a_t^(b)|x_t^(b), M_t^(b)),
+    the score-weighted sum every policy-gradient estimator here is built from.
+    `steps` is one (t, states, actions, mu) tuple per time index and `weights`
+    the matching (T, B) coefficients (typically G_t - baseline_t). Returns
+    shape (D,).
+
+    Computed as the gradient of a scalar surrogate rather than by weighting
+    per-sample scores, using
+        sum_b w^(b) grad_theta log pi(a^(b)|x^(b)) = grad_theta sum_b w^(b) log pi(a^(b)|x^(b))
+    for detached w. The two are algebraically identical, but `policy_score`
+    must materialize a (B, D) tensor of per-sample gradients to form the left
+    side, and D is the whole policy: at distribution planning's D~7.7e4 and
+    the equal-budget B=15490, that single tensor is 4.4 GiB, while the
+    surrogate's backward only ever holds (B, hidden_width) activations —
+    about 30 MiB. The batch is therefore free to grow with the sampling
+    budget, which `policy_score` is not.
+
+    `theta` is detached and re-attached locally, so callers can pass a plain
+    parameter vector exactly as they do to `policy_score`.
+    """
+    theta = theta.detach().requires_grad_(True)
+    total = torch.zeros_like(theta)
+    for (t, states, actions, mu), w in zip(steps, weights):
+        probs = eval_batched(action_probs_fn, theta, t, states, mu)
+        chosen = (probs * one_hot(actions, probs.shape[-1], probs.dtype)).sum(dim=-1)
+        surrogate = (w * torch.log(chosen.clamp_min(1e-12))).sum()  # clamp matches policy_score's
+        # One backward per step, rather than one over the summed surrogate:
+        # keeps only the current step's graph alive instead of all T at once.
+        total = total + torch.autograd.grad(surrogate, theta)[0]
+    return total.detach()
+
+
 def exact_population_flow(
     env,
     action_probs_fn,

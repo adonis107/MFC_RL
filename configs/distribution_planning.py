@@ -87,11 +87,17 @@ class DistributionPlanningRunConfig:
 MAIN = DistributionPlanningRunConfig(name="main")
 
 # mid/smoke also shrink B (unlike twostate/cybersecurity's tiers, which only
-# shrink n_train): the policy MLP here has ~76.6k parameters (width-256
-# hidden layers, vs. cybersecurity's ~1.5k at width 32), so a single
-# gradient step's score tensors (shape (T, B, D)) at the reference's B=500
-# already need several GB — a memory-practicality reduction for fast dev
-# iteration on modest hardware, not a fidelity choice; MAIN keeps B=500 exactly.
+# shrink n_train), to keep a dev iteration quick: the policy MLP here has
+# ~76.6k parameters (width-256 hidden layers, vs. cybersecurity's ~1.5k at
+# width 32), so per-step cost scales steeply in B. Speed, not fidelity —
+# MAIN keeps B=500 exactly.
+#
+# This used to be a memory limit as well: the estimators materialized
+# (T,B,D) per-sample score tensors, several GB per step at B=500. They no
+# longer do (see `mfc.algorithms._common.weighted_score_sum`), and a step
+# now costs ~100 MiB even at the equal-budget B=15490, so if a faster
+# machine makes the wall-clock affordable there is nothing stopping these
+# tiers from moving back toward B=500.
 MID = DistributionPlanningRunConfig(
     name="mid",
     n_train=5_000,

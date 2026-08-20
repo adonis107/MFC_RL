@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import torch
 
-from ._common import exact_population_flow, policy_score, sample_actions
+from ._common import exact_population_flow, sample_actions, weighted_score_sum
 
 __all__ = ["gradient_estimate", "gradient_step", "train"]
 
@@ -56,38 +56,37 @@ def gradient_estimate(
     term to make model-free here). `gamma=1.0` (default) recovers the
     undiscounted estimator; see `_common.exact_objective`. Returns shape (D,).
 
-    Accumulated into one (D,) vector rather than through a (T,B,D) score
-    buffer, via the running-score-sum rearrangement of sum_t L_t G_t that
-    `simplex.gradient_estimate` documents in full. Same estimator, same
-    random stream, a fraction of the memory (which for a large policy is the
-    whole cost of a gradient step).
+    The (T,B,D) score tensor the formula suggests is never built: the whole
+    estimator is one score-weighted sum, so it goes through
+    `_common.weighted_score_sum` (see `simplex.gradient_estimate` for the
+    full argument). Same estimator, same random stream, a fraction of the
+    memory — which for a large policy is the entire cost of a gradient step.
     """
     device, dtype = theta.device, theta.dtype
-    N, D = env.n_states, theta.numel()
+    N = env.n_states
     baseline = torch.zeros(T + 1, dtype=dtype, device=device) if baseline is None else baseline
 
     states = torch.multinomial(mu0.expand(B, N), 1, generator=generator).reshape(B)
     rewards = torch.zeros(T, B, dtype=dtype, device=device)
     terminal_reward = torch.zeros(B, dtype=dtype, device=device)
-    C = torch.zeros(B, D, dtype=dtype, device=device)  # running score sum sum_{s<=t} L_s
-    g = torch.zeros(D, dtype=dtype, device=device)
+    steps = []
 
     for t in range(T + 1):
         mu_t = mu_flow[t]
         if t < T:
             actions = sample_actions(action_probs_fn, theta, t, states, mu_t, generator=generator)
-            L = policy_score(action_probs_fn, theta, t, states, actions, mu_t)  # (B, D)
-            C += L
-            g -= baseline[t] * L.sum(dim=0)
-            del L  # the step's largest tensor; drop it before the next one is built
+            steps.append((t, states, actions, mu_t))
             rewards[t] = env.reward(states, actions, mu_t)
-            g += (gamma**t) * (rewards[t] @ C)
             states = env.sample_next_states(states, actions, mu_t, generator=generator)
         else:
             terminal_reward[:] = env.terminal_reward(states, mu_t)
-            g += (gamma**T) * (terminal_reward @ C)  # C is C_{T-1} here
 
-    return g / B
+    G = torch.zeros(T + 1, B, dtype=dtype, device=device)
+    G[T] = (gamma**T) * terminal_reward
+    for t in range(T - 1, -1, -1):
+        G[t] = (gamma**t) * rewards[t] + G[t + 1]
+
+    return weighted_score_sum(action_probs_fn, theta, steps, G[:T] - baseline[:T].view(-1, 1)) / B
 
 
 def gradient_step(

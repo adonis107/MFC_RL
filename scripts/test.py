@@ -55,7 +55,15 @@ ENVIRONMENTS = {"twostate": TwoState, "cybersecurity": CyberSecurity, "distribut
 # --------------------------------------------------------------------------
 
 
-def load_runs(env_name: str, alg_name: str, config_name: str, *, output_dir: str = str(ROOT / "runs"), device: str | None = None) -> list[dict]:
+def load_runs(
+    env_name: str,
+    alg_name: str,
+    config_name: str,
+    *,
+    output_dir: str = str(ROOT / "runs"),
+    device: str | None = None,
+    with_history: bool = False,
+) -> list[dict]:
     """Load every individual run file scripts.train.run_all saved for this
     (env, alg, config). Matches on "..._seed<N>.pt" specifically (not just
     "{alg}_*.pt") so this never picks up run_diagnostics' own
@@ -66,13 +74,28 @@ def load_runs(env_name: str, alg_name: str, config_name: str, *, output_dir: str
     env's own `.device` explicitly otherwise, since environments auto-detect
     CUDA regardless of the torch-global default), so checkpoints cached from
     a different device (e.g. CPU-trained results reloaded in a CUDA session)
-    work without retraining."""
+    work without retraining.
+
+    `theta_history` is dropped unless `with_history=True`, and stays on the
+    CPU even then. It dominates a checkpoint completely — a cybersecurity
+    `main` run is 115.4 MiB of history against 0.04 MiB of everything else —
+    while no diagnostic here or in the notebooks reads it (they use
+    `theta_final`/`theta0`/`validation_J`), so loading a whole sweep onto an
+    accelerator would exhaust it for nothing: 81 files is 9.1 GiB of almost
+    pure history."""
     root = Path(output_dir) / env_name / config_name
     device = device if device is not None else torch.get_default_device()
+    history_keys = () if with_history else ("theta_history", "theta_history_iterations")
     runs = []
     for f in sorted(root.glob(f"{alg_name}_*_seed*.pt")):
-        run = torch.load(f, weights_only=False)
-        runs.append({k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in run.items()})
+        # map_location is not optional: a checkpoint records the device it was
+        # trained on, so an unqualified torch.load restores a CUDA-trained run
+        # onto the GPU *while unpickling* — filling it before the line below
+        # ever gets to decide what belongs there.
+        run = torch.load(f, map_location="cpu", weights_only=False)
+        for key in history_keys:
+            run.pop(key, None)
+        runs.append({k: (v if k == "theta_history" else v.to(device)) if isinstance(v, torch.Tensor) else v for k, v in run.items()})
     return runs
 
 

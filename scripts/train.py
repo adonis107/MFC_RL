@@ -515,6 +515,10 @@ def materialize_duplicates(
             print(f"[{env_name}/{config_name}] {dup_tag} ... skipped (primary {primary_tag} not trained yet)")
             continue
 
+        # Deliberately no map_location: the copy must match its primary in
+        # every respect but `budget_mode`, device included, so that the two
+        # tags are interchangeable downstream. (Cheap regardless — `train_run`
+        # already keeps the bulky `theta_history` on the CPU.)
         result = dict(torch.load(primary_path, weights_only=False), budget_mode=budget_mode_i)
         torch.save(result, dup_path)
         print(f"[{env_name}/{config_name}] {dup_tag} ... copied from {primary_tag}")
