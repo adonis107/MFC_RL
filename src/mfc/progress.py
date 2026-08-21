@@ -4,7 +4,7 @@ to draw one.
 
 Every training loop in this repo is a plain `for m in range(n_train)`
 (`scripts/train.py`'s `train_run` for the discrete benchmarks,
-`mfc.algorithms.lq.train`/`mfc.algorithms.portfolio.train` for the continuous
+`mfc.algorithms.continuous.train` for the continuous
 ones), so `training_bar` just wraps that range and each loop is written the
 same way.
 

@@ -7,7 +7,7 @@ from configs.lq import SMOKE as LQ_SMOKE
 from configs.twostate import MAIN as TWOSTATE_MAIN
 from configs.twostate import SMOKE as TWOSTATE_SMOKE
 from configs.twostate import TwoStateRunConfig
-from scripts.train import experiment_tag, list_continuous_experiments, list_experiments, materialize_duplicates, run_all
+from scripts.train import experiment_tag, list_continuous_experiments, list_experiments, materialize_duplicates, run_all, run_continuous
 
 
 def test_list_experiments_with_no_overrides_reproduces_the_full_config_grid():
@@ -41,7 +41,7 @@ def test_list_experiments_reinforce_has_no_lambda_axis():
     assert experiments[0][3] is None  # lam
 
 
-def test_twostate_main_groups_matches_the_5_requested_combinations():
+def test_twostate_main_groups_matches_the_4_requested_combinations():
     """The specific (budget_mode, flow, T) restriction actually asked for,
     not the full budget_modes x flows x horizons cartesian product
     (2 x 2 x 3 = 12) MAIN's own budget_modes/flows/horizons fields would
@@ -49,9 +49,13 @@ def test_twostate_main_groups_matches_the_5_requested_combinations():
     assert TWOSTATE_MAIN.groups == (
         ("equal_parameters", "exact", 2),
         ("equal_budget", "exact", 2),
-        ("equal_budget", "particle", 2),
         ("equal_budget", "particle", 5),
         ("equal_budget", "particle", 10),
+    )
+    # the exact flow is only run at the base horizon, so no (budget_mode, T)
+    # pair appears under both flows (see the config's inline comment)
+    assert {(bm, T) for bm, fl, T in TWOSTATE_MAIN.groups if fl == "exact"}.isdisjoint(
+        {(bm, T) for bm, fl, T in TWOSTATE_MAIN.groups if fl == "particle"}
     )
 
 
@@ -92,13 +96,42 @@ def test_list_experiments_dedups_budget_mode_invariant_algorithm():
 
 
 def test_list_continuous_experiments_override_semantics():
-    experiments = list_continuous_experiments(LQ_SMOKE, lam=0.1, seed=2)
+    experiments = list_continuous_experiments(LQ_SMOKE, "simplex", lam=0.1, seed=2)
     assert len(experiments) == 1
     T, lam, seed = experiments[0]
     assert lam == 0.1 and seed == 2 and T == LQ_SMOKE.horizons[0]
 
-    full = list_continuous_experiments(LQ_SMOKE)
+    full = list_continuous_experiments(LQ_SMOKE, "simplex")
     assert len(full) == len(LQ_SMOKE.horizons) * len(LQ_SMOKE.lambdas) * len(LQ_SMOKE.seeds)
+
+
+def test_list_continuous_experiments_gives_reinforce_no_lambda_axis():
+    """The perturbation exists to expose the mean-field sensitivity through a
+    likelihood ratio; reinforce drops that term, so it is trained once per
+    (T, seed) on the nominal process rather than once per lambda — the same
+    convention the discrete grid already uses."""
+    experiments = list_continuous_experiments(LQ_SMOKE, "reinforce")
+    assert len(experiments) == len(LQ_SMOKE.horizons) * len(LQ_SMOKE.seeds)
+    assert {lam for _, lam, _ in experiments} == {None}
+
+    with pytest.raises(ValueError, match="no perturbation scale"):
+        list_continuous_experiments(LQ_SMOKE, "reinforce", lam=0.1)
+
+
+def test_run_continuous_records_reinforce_without_a_lambda(tmp_path):
+    """Its saved run must carry lam=None (so `scripts.test.group_by` and the
+    notebooks' plots treat it as one baseline, not one line per lambda) and
+    its filename must carry no lambda tag."""
+    from configs.lq import LQRunConfig
+    import scripts.train as train_mod
+
+    cfg = LQRunConfig(name="tiny", horizons=(2,), n_train=3, seeds=(0,), B=8, n_aux=4, validate_every=1)
+    train_mod.CONFIGS.setdefault("lq", {})["tiny_no_lambda"] = cfg
+
+    results = run_continuous("lq", "reinforce", "tiny_no_lambda", output_dir=str(tmp_path))
+    assert len(results) == 1
+    assert results[0]["lam"] is None
+    assert (tmp_path / "lq" / "tiny_no_lambda" / "reinforce_T2_seed0.pt").exists()
 
 
 def test_run_all_dtype_tag_prevents_float32_from_colliding_with_float64(tmp_path):

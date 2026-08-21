@@ -10,6 +10,10 @@ T_val=50, mu0_val=(0.25,0.25,0.25,0.25), and 5 independent seeds. n_train
 it for faster iteration. epsilon is fixed (not swept, matching this repo's
 twostate convention) at 1.0, the value used for the reference's Figure 3
 flow visualization; the reference itself sweeps epsilon in {0.2,0.5,1.0,2.0}.
+The lambda grid is trimmed to {0.1,0.2,0.4} (the reference's own grid also
+carries 0.8) to keep the paid run's job count down: 0.8 is far outside the
+small-perturbation regime the theory covers, and two-state's `main` still
+sweeps the full grid including it.
 
 Unlike two-state, mu0 is *not* resampled from a RunConfig-parametrized range
 each training iteration: it is always mu0~Dirichlet(1,1,1,1), a model
@@ -35,14 +39,13 @@ adapted to match) and *only* flow="particle" (the empirical population-flow
 estimate, Assumption "Access to the nominal population flow" — not the exact
 recursion), rather than sweeping both options as two-state's `main` does.
 Because cybersecurity's n_aux=1 (vs two-state's n_aux=10), the quadratic term
-in mfreinforce's cost stays small even as T grows, so simplex's equal-budget
-main batch only grows from 599 (T=3) to 899 (T=6) to 1499 (T=12) — nothing
-like two-state's T=10 batch of ~11190.
+in mfreinforce's cost stays small, so simplex's equal-budget main batch at
+T=3 is only 599 — nothing like two-state's T=10 batch of ~11190.
 
-Horizons. `main` sweeps T_train in {3, 6, 12}: 3 is the reference's own
-(short, to limit sensitivity-estimator error accumulation — see above),
-6 and 12 are this repo's own extension (doubling each step) for a
-horizon-scaling comparison, as two-state's `main` does with {2, 5, 10}.
+Horizons. `main` runs the single reference horizon T_train=3 (kept short to
+limit sensitivity-estimator error accumulation — see above); the
+horizon-scaling comparison lives entirely in two-state's `main`, which
+sweeps T in {2, 5, 10}, so it isn't repeated here.
 """
 
 from __future__ import annotations
@@ -61,12 +64,12 @@ class CyberSecurityRunConfig:
     particle_size: int = 200  # N~ trajectories/step for the particle population estimate
 
     # perturbation grid (reference "Compared perturbation schemes")
-    lambdas: tuple[float, ...] = (0.1, 0.2, 0.4, 0.8)  # simplex perturbation scale
+    lambdas: tuple[float, ...] = (0.1, 0.2, 0.4)  # simplex perturbation scale (reference also has 0.8; see module docstring)
     epsilon: float = 1.0  # logit (MF-REINFORCE) perturbation scale
     sigma: float = 1.0  # simplex Gaussian perturbation std
 
     # horizon (reference "Training and validation protocol")
-    horizons: tuple[int, ...] = (3,)  # T_train: kept short to limit sensitivity-estimator error accumulation
+    horizons: tuple[int, ...] = (3,)  # T_train: the reference's own, kept short to limit sensitivity-estimator error accumulation
     T_val: int | None = 50  # validation horizon, longer than training
 
     # Monte Carlo budget and optimization (reference "Training and validation protocol")
@@ -101,7 +104,6 @@ MAIN = CyberSecurityRunConfig(
     name="main",
     budget_modes=("equal_budget",),
     flows=("particle",),
-    horizons=(3, 6, 12),
 )
 
 MID = CyberSecurityRunConfig(

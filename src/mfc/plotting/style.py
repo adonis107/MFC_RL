@@ -1,19 +1,8 @@
-"""Publication-quality Matplotlib styling.
+"""Publication-oriented Matplotlib helper wrappers.
 
-The module provides a quiet, print-friendly visual system for papers, reports,
-and research notebooks. It deliberately avoids a LaTeX dependency so figures
-render consistently in local environments, CI, and Google Colab.
-
-Typical use
------------
->>> from style import new_figure, apply_style, save_figure
->>> fig, ax = new_figure(width="single")
->>> ax.plot(x, y, label="Estimate")
->>> apply_style(ax, xlabel=r"Time $t$", ylabel="Value", legend=True)
->>> save_figure(fig, "figure.pdf")
-
-For an entire notebook, call ``set_style()`` once or use ``style_context()``
-to limit the settings to a single block.
+The notebooks in this repository are used as research artifacts: figures
+should have readable typography, clear legends, restrained grids, and stable
+paper-friendly dimensions without every cell repeating the same rcParams.
 """
 
 from __future__ import annotations
@@ -27,7 +16,8 @@ import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
-# Restrained, colourblind-safe categorical colours derived from Okabe-Ito.
+
+# Restrained, colorblind-safe categorical colors derived from Okabe-Ito.
 CATEGORICAL = [
     "#0072B2",  # blue
     "#D55E00",  # vermilion
@@ -38,10 +28,8 @@ CATEGORICAL = [
     "#F0E442",  # yellow
     "#111111",  # black
 ]
-
 SEQUENTIAL = ["#EFF3F8", "#C6DBEF", "#9ECAE1", "#6BAED6", "#3182BD", "#08519C"]
 DIVERGING = {"low": "#2166AC", "mid": "#F7F7F7", "high": "#B2182B"}
-
 INK = {
     "primary": "#1A1A1A",
     "secondary": "#4D4D4D",
@@ -50,80 +38,68 @@ INK = {
     "axis": "#737373",
     "surface": "#FFFFFF",
 }
-
 STATUS = {
     "good": "#16835D",
     "warning": "#C58A00",
     "serious": "#C65D21",
     "critical": "#B2182B",
 }
-
-# Common single- and double-column figure widths, in inches.
 FIGURE_WIDTHS = {"single": 3.35, "medium": 5.25, "double": 7.0}
 GOLDEN_RATIO = (5**0.5 - 1) / 2
 
 
-def _rc_params() -> dict[str, object]:
-    """Return the style settings without mutating global Matplotlib state."""
-    return {
-        "figure.facecolor": INK["surface"],
-        "figure.dpi": 140,
-        "savefig.facecolor": INK["surface"],
-        "savefig.bbox": "tight",
-        "savefig.pad_inches": 0.03,
-        "savefig.dpi": 300,
-        "font.family": "serif",
-        "font.serif": ["STIX Two Text", "STIXGeneral", "DejaVu Serif"],
-        "mathtext.fontset": "stix",
-        "font.size": 9,
-        "axes.titlesize": 10,
-        "axes.titleweight": "semibold",
-        "axes.labelsize": 9,
-        "axes.labelcolor": INK["primary"],
-        "axes.edgecolor": INK["axis"],
-        "axes.linewidth": 0.65,
-        "axes.prop_cycle": mpl.cycler(color=CATEGORICAL),
-        "axes.axisbelow": True,
-        "axes.grid": False,
-        "xtick.color": INK["secondary"],
-        "ytick.color": INK["secondary"],
-        "xtick.labelsize": 8,
-        "ytick.labelsize": 8,
-        "xtick.direction": "out",
-        "ytick.direction": "out",
-        "xtick.major.size": 3.0,
-        "ytick.major.size": 3.0,
-        "xtick.major.width": 0.65,
-        "ytick.major.width": 0.65,
-        "xtick.minor.size": 1.8,
-        "ytick.minor.size": 1.8,
-        "lines.linewidth": 1.5,
-        "lines.markersize": 4.0,
-        "legend.fontsize": 8,
-        "legend.frameon": False,
-        "legend.handlelength": 1.8,
-        "legend.handletextpad": 0.5,
-        "legend.columnspacing": 1.0,
-        "patch.linewidth": 0.6,
-        "pdf.fonttype": 42,
-        "ps.fonttype": 42,
-    }
-
-
 def set_style() -> None:
-    """Apply the publication style globally for the current Python session."""
-    mpl.rcParams.update(_rc_params())
+    """Install compact defaults suitable for notebooks and paper exports."""
+    mpl.rcParams.update(
+        {
+            "figure.dpi": 120,
+            "figure.facecolor": INK["surface"],
+            "savefig.dpi": 300,
+            "savefig.bbox": "tight",
+            "savefig.facecolor": INK["surface"],
+            "font.family": "serif",
+            "font.serif": ["STIX Two Text", "STIXGeneral", "DejaVu Serif"],
+            "mathtext.fontset": "stix",
+            "font.size": 10,
+            "axes.titlesize": 11,
+            "axes.titleweight": "semibold",
+            "axes.labelsize": 10,
+            "axes.labelcolor": INK["primary"],
+            "axes.edgecolor": INK["axis"],
+            "axes.linewidth": 0.7,
+            "axes.prop_cycle": mpl.cycler(color=CATEGORICAL),
+            "axes.spines.top": False,
+            "axes.spines.right": False,
+            "axes.grid": False,
+            "axes.axisbelow": True,
+            "grid.color": INK["grid"],
+            "grid.linewidth": 0.7,
+            "grid.alpha": 0.55,
+            "lines.linewidth": 1.9,
+            "lines.markersize": 5,
+            "xtick.color": INK["secondary"],
+            "ytick.color": INK["secondary"],
+            "legend.frameon": True,
+            "legend.framealpha": 0.95,
+            "legend.borderpad": 0.4,
+            "legend.labelspacing": 0.35,
+            "legend.handlelength": 2.0,
+            "xtick.labelsize": 9,
+            "ytick.labelsize": 9,
+        }
+    )
 
 
 @contextmanager
 def style_context() -> Iterator[None]:
-    """Temporarily apply the publication style inside a ``with`` block."""
-    with mpl.rc_context(_rc_params()):
+    """Temporarily apply the repository's publication plotting defaults."""
+    with mpl.rc_context():
+        set_style()
         yield
 
 
 def color_for(index: int) -> str:
-    """Return the stable categorical colour assigned to a zero-based index."""
+    """Return the stable categorical color assigned to a zero-based index."""
     return CATEGORICAL[index % len(CATEGORICAL)]
 
 
@@ -134,24 +110,13 @@ def new_figure(
     figsize: tuple[float, float] | None = None,
     constrained_layout: bool = True,
 ) -> tuple[Figure, Axes]:
-    """Create a paper-sized figure and axes.
-
-    ``figsize`` is retained for backwards compatibility. Otherwise, ``width``
-    accepts a standard journal width or an explicit width in inches; height
-    defaults to the golden-ratio proportion.
-    """
+    """Create a Matplotlib figure and axes with publication defaults."""
     set_style()
     if figsize is None:
         figure_width = FIGURE_WIDTHS[width] if isinstance(width, str) else float(width)
         figure_height = height if height is not None else figure_width * GOLDEN_RATIO
         figsize = (figure_width, figure_height)
-
-    fig, ax = plt.subplots(
-        figsize=figsize,
-        facecolor=INK["surface"],
-        constrained_layout=constrained_layout,
-    )
-    return fig, ax
+    return plt.subplots(figsize=figsize, facecolor=INK["surface"], constrained_layout=constrained_layout)
 
 
 def apply_style(
@@ -160,54 +125,44 @@ def apply_style(
     title: str | None = None,
     xlabel: str | None = None,
     ylabel: str | None = None,
-    grid: Literal["x", "y", "both"] | None = "y",
+    grid: Literal["x", "y", "both"] | bool | None = "y",
     legend: bool = False,
-    despine: bool = True,
+    despine: bool = False,
 ) -> Axes:
-    """Apply clean publication chrome after plotting the data."""
+    """Apply common labels, grid, and legend styling to an axes."""
+    del despine
     ax.set_facecolor(INK["surface"])
-    ax.set_axisbelow(True)
-
-    ax.grid(False)
-    if grid is not None:
-        ax.grid(
-            True,
-            axis=grid,
-            color=INK["grid"],
-            linewidth=0.5,
-            linestyle="-",
-            alpha=0.65,
-        )
-
-    if despine:
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-    for side in ("left", "bottom"):
-        ax.spines[side].set_color(INK["axis"])
-        ax.spines[side].set_linewidth(0.65)
-
-    ax.tick_params(colors=INK["secondary"], labelsize=8, pad=3)
+    ax.tick_params(colors=INK["secondary"])
     if title is not None:
         ax.set_title(title, color=INK["primary"], loc="center", pad=8)
     if xlabel is not None:
-        ax.set_xlabel(xlabel, color=INK["primary"], labelpad=5)
+        ax.set_xlabel(xlabel, color=INK["primary"])
     if ylabel is not None:
-        ax.set_ylabel(ylabel, color=INK["primary"], labelpad=5)
+        ax.set_ylabel(ylabel, color=INK["primary"])
+    if grid:
+        ax.grid(True, axis=grid if isinstance(grid, str) else "both")
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color(INK["axis"])
+        ax.spines[side].set_linewidth(0.7)
+    ax.margins(x=0.02)
     if legend:
         style_legend(ax)
     return ax
 
 
 def style_legend(ax: Axes, **kwargs):
-    """Draw an unobtrusive legend consistent with the figure typography."""
-    defaults = {
-        "frameon": False,
-        "fontsize": 8,
-        "labelcolor": INK["secondary"],
-        "borderaxespad": 0.3,
-    }
+    """Draw a compact legend when labeled artists are present."""
+    handles, labels = ax.get_legend_handles_labels()
+    visible = [(h, label) for h, label in zip(handles, labels) if label and not label.startswith("_")]
+    if not visible:
+        return None
+    handles, labels = zip(*visible)
+    defaults = {"fontsize": 9, "frameon": True}
     defaults.update(kwargs)
-    return ax.legend(**defaults)
+    legend = ax.legend(handles, labels, **defaults)
+    legend.get_frame().set_linewidth(0.6)
+    legend.get_frame().set_edgecolor("0.85")
+    return legend
 
 
 def save_figure(
@@ -218,17 +173,10 @@ def save_figure(
     transparent: bool = False,
     **kwargs,
 ) -> Path:
-    """Export a tightly cropped, publication-ready figure and return its path."""
+    """Save a figure and return its path."""
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(
-        output,
-        dpi=dpi,
-        bbox_inches="tight",
-        pad_inches=0.03,
-        transparent=transparent,
-        **kwargs,
-    )
+    fig.savefig(output, dpi=dpi, transparent=transparent, **kwargs)
     return output
 
 

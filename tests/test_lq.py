@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import pytest
 import torch
 
-from mfc.algorithms.lq import reinforce_step, train
+from mfc.algorithms.continuous import train
 from mfc.environments.lq import LQ, LQConfig
 
 
@@ -71,7 +72,7 @@ def test_riccati_optimal_is_a_stationary_point_of_the_exact_gradient():
     assert g.abs().max().item() < 1e-8
 
 
-def test_rollout_shapes_and_terminal_time_perturbation():
+def test_rollout_shapes_and_per_replica_perturbation():
     env = LQ()
     T = env.config.T
     theta = env.init_theta()
@@ -79,23 +80,28 @@ def test_rollout_shapes_and_terminal_time_perturbation():
     out = env.rollout(theta, lam=0.3, B=64, generator=generator)
     assert out["X"].shape == (T + 1, 64)
     assert out["alpha"].shape == (T, 64)
-    assert out["mu_hat"].shape == (T + 1,)
-    assert out["running_cost"].shape == (T, 64)
-    assert out["terminal_cost"].shape == (64,)
-    for t in (out["X"], out["alpha"], out["mu_hat"], out["running_cost"], out["terminal_cost"]):
+    assert out["M"].shape == (T + 1, 64)  # one perturbation draw per replica, not one shared across the batch
+    assert out["xi"].shape == (T + 1, 64)
+    assert out["mu"].shape == (T + 1,)
+    assert out["running"].shape == (T, 64)
+    assert out["terminal"].shape == (64,)
+    for t in out.values():
         assert not t.requires_grad  # theta is detached throughout rollout
+    assert (out["M"][:, 0] != out["M"][:, 1]).all()
 
 
-def test_reinforce_step_gradient_is_nonzero_and_finite():
-    """Regression test for a real bug: sampling `alpha` with the same
-    (attached) theta later used to score it made alpha-means cancel to a
-    theta-independent constant, silently zeroing the whole estimator."""
+def test_rollout_standardized_perturbation_reproduces_the_population_argument():
+    """xi is exactly the standardization of M around the nominal coordinate:
+    M_t = mu_t + lambda*rho*sqrt(mu_t^2+1)*xi_t, which is the form
+    `mfc.algorithms.continuous_simplex.perturbation_score` is written in."""
     env = LQ()
-    theta = env.init_theta().clone().requires_grad_(True)
-    generator = torch.Generator(device=env.device).manual_seed(0)
-    g = reinforce_step(env, theta, lam=0.2, B=128, generator=generator)
-    assert torch.isfinite(g).all()
-    assert g.abs().max().item() > 0.0
+    theta = 0.2 * torch.randn(env.config.T, 2, dtype=env.dtype, device=env.device)
+    lam, rho = 0.3, env.config.rho
+    out = env.rollout(theta, lam=lam, B=256, generator=torch.Generator(device=env.device).manual_seed(0))
+    mu = out["mu"].unsqueeze(-1)
+    assert torch.allclose(out["M"], mu + lam * rho * torch.sqrt(mu**2 + 1.0) * out["xi"])
+    assert out["xi"].mean().abs().item() < 0.2  # standard normal
+    assert abs(out["xi"].std().item() - 1.0) < 0.2
 
 
 def test_train_exact_gradient_converges_close_to_the_riccati_optimum():
@@ -107,11 +113,12 @@ def test_train_exact_gradient_converges_close_to_the_riccati_optimum():
     assert result["validation_J"][-1].item() < 1.05 * J_star
 
 
-def test_train_reinforce_runs_and_returns_expected_fields():
+@pytest.mark.parametrize("algorithm,kwargs", [("reinforce", {"B": 32}), ("simplex", {"B": 32, "n_aux": 16})])
+def test_train_runs_and_returns_expected_fields(algorithm, kwargs):
     env = LQ()
     theta0 = env.init_theta()
     generator = torch.Generator(device=env.device).manual_seed(0)
-    result = train(env, theta0, algorithm="reinforce", n_train=20, lr=0.05, lam=0.2, B=32, validate_every=5, generator=generator)
+    result = train(env, theta0, algorithm=algorithm, n_train=20, lr=0.05, lam=0.2, validate_every=5, generator=generator, **kwargs)
     T = env.config.T
     assert result["theta_history"].shape == (21, T, 2)
     assert result["validation_iterations"].numel() == result["validation_J"].numel() > 0

@@ -25,6 +25,19 @@ exact_gradient) only uses the algorithm-agnostic exact-flow/objective
 machinery in `mfc.algorithms._common` and works for any algorithm's saved
 runs. Horizon-scaling aggregation across the saved T values is left to
 notebooks, where the plotting is.
+
+The continuous-state benchmarks (`lq`, `portfolio`) have their own section
+near the bottom of this module, with the same diagnostics reformulated for a
+population law in P_2(R): `continuous_objective_gap`,
+`continuous_gradient_diagnostics`, `continuous_sensitivity_error`,
+`continuous_perturbation_coverage`, `continuous_state_marginal_stability`,
+`continuous_generalization_eval`, driven by `run_continuous_diagnostics`.
+They are sharper than their discrete counterparts in one specific way: there
+the ground truth for a gradient is itself an estimator, whereas here
+`env.exact_gradient(theta, lam)` gives BOTH grad J^0 (lam=0) and grad
+J^lambda in closed form, so the estimator's perturbation bias and its
+sensitivity-estimation bias can be separated exactly rather than only
+bounded together.
 """
 
 from __future__ import annotations
@@ -41,13 +54,16 @@ for path in (SRC, ROOT):
 
 import torch
 
-from mfc.algorithms import mfreinforce, simplex
+from mfc.algorithms import continuous_reinforce, continuous_simplex, mfreinforce, simplex
 from mfc.environments.advertising import Advertising
 from mfc.environments.cybersecurity import CyberSecurity
 from mfc.environments.distribution_planning import DistributionPlanning
+from mfc.environments.lq import LQ
+from mfc.environments.portfolio import Portfolio
 from mfc.environments.twostate import TwoState
 
 ENVIRONMENTS = {"twostate": TwoState, "cybersecurity": CyberSecurity, "distribution_planning": DistributionPlanning, "advertising": Advertising}
+CONTINUOUS_ENVIRONMENTS = {"lq": LQ, "portfolio": Portfolio}
 
 
 # --------------------------------------------------------------------------
@@ -578,6 +594,367 @@ def rollout(env, action_probs_fn, theta: torch.Tensor, mu0: torch.Tensor, T: int
 
 
 # --------------------------------------------------------------------------
+# Continuous-state diagnostics (`lq`, `portfolio`)
+#
+# The population law lives in P_2(R) and is perturbed by transport rather
+# than inside a simplex (see `mfc.algorithms.continuous_simplex`), so the
+# discrete diagnostics above are reformulated here around its coordinate
+# c_t^theta = mu_t^theta: sensitivities are grad_theta mu_t^theta rather than
+# grad_theta mu_t^theta(k), and perturbation size is measured in W_2 rather
+# than in total variation.
+# --------------------------------------------------------------------------
+
+
+def exact_coordinate_sensitivity(env, theta: torch.Tensor) -> torch.Tensor:
+    """
+    D_t^theta = grad_theta c_t^theta = grad_theta mu_t^theta, t=0,...,T, via
+    ordinary autograd through the environment's deterministic forward moment
+    recursion (`env.forward_moments(theta, 0.0)`). Ground truth for
+    `continuous_simplex.estimate_sensitivity_flow`'s single-batch forward
+    estimator; never used inside the model-free estimator itself
+    (differentiating the population dynamics is exactly what it avoids).
+    Returns shape (T+1, T, 2) — one theta-shaped sensitivity per time index.
+    """
+    theta = theta.detach().requires_grad_(True)
+    mu, _ = env.forward_moments(theta, 0.0)
+    return torch.stack([torch.autograd.grad(mu[t], theta, retain_graph=True)[0] for t in range(theta.shape[0] + 1)]).detach()
+
+
+def continuous_objective_gap(env, theta: torch.Tensor, *, lam: float, n_samples: int, generator=None) -> dict:
+    """
+    J^lambda(theta) vs J^0(theta) at the given theta, all three ways: the two
+    closed forms (`env.exact_objective`) and a Monte Carlo estimate of
+    J^lambda from `n_samples` perturbed rollouts. The MC column exists to
+    check the simulator against the closed form — the perturbed objective is
+    exact here, unlike every discrete benchmark, so `gap` carries no Monte
+    Carlo error at all.
+    """
+    theta = theta.detach()
+    J = env.exact_objective(theta, 0.0)
+    J_lambda = env.exact_objective(theta, lam)
+    samples = continuous_simplex.estimate_objective(env, theta, lam, n_samples, generator=generator)
+    return {
+        "J": J,
+        "J_lambda": J_lambda,
+        "gap": J_lambda - J,
+        "J_lambda_mean": samples.mean(),
+        "J_lambda_se": samples.std() / n_samples**0.5,
+    }
+
+
+def continuous_gradient_diagnostics(
+    env,
+    theta: torch.Tensor,
+    *,
+    lam: float,
+    B: int,
+    n_aux: int | None = None,
+    reps: int,
+    algorithm: str = "simplex",
+    baseline=None,
+    generator=None,
+) -> dict:
+    """
+    Empirical bias, standard deviation and MSE of a continuous-state gradient
+    estimator at a fixed theta, from `reps` independent draws of
+    `continuous_simplex.gradient_step` (`algorithm="simplex"`, needs `n_aux`)
+    or `continuous_reinforce.gradient_step` (`algorithm="reinforce"`).
+
+    Both oracles are exact and closed-form, which is what makes this sharper
+    than `gradient_diagnostics`: grad J^0 (`oracle_gradient`) is the quantity
+    the whole construction targets, grad J^lambda (`perturbed_gradient`) is
+    what the estimator is unbiased for when the sensitivity flow is exact.
+    The reported `bias` (against grad J^0) therefore splits exactly into
+
+        perturbation_bias = grad J^lambda - grad J^0    (term III, O(lambda^p))
+        estimation_bias   = E[ghat] - grad J^lambda     (term II, O(1/n) for
+                                                         simplex; the whole
+                                                         missing mean-field
+                                                         term for reinforce)
+
+    (Theorem "Bias and MSE of the gradient estimator",
+    continuous_state_space(2).tex), with `bias_se` the Monte Carlo standard
+    error of the estimated mean, so a real bias can be told from reps noise.
+    """
+    theta = theta.detach()
+    oracle = env.exact_gradient(theta, 0.0)
+    perturbed = env.exact_gradient(theta, lam)
+    if algorithm == "simplex":
+        step = lambda: continuous_simplex.gradient_step(env, theta, lam, B=B, n_aux=n_aux, baseline=baseline, generator=generator)
+    elif algorithm == "reinforce":
+        step = lambda: continuous_reinforce.gradient_step(env, theta, lam, B=B, baseline=baseline, generator=generator)
+    else:
+        raise ValueError(f"unknown algorithm {algorithm!r}; available: simplex, reinforce")
+
+    samples = torch.stack([step() for _ in range(reps)])
+    mean, std = samples.mean(dim=0), samples.std(dim=0)
+    return {
+        "oracle_gradient": oracle,
+        "perturbed_gradient": perturbed,
+        "mean_estimate": mean,
+        "bias": mean - oracle,
+        "perturbation_bias": perturbed - oracle,
+        "estimation_bias": mean - perturbed,
+        "bias_se": std / reps**0.5,
+        "std": std,
+        "mse": ((samples - oracle) ** 2).mean(dim=0),
+    }
+
+
+def continuous_oracle_gradient_estimate(env, theta: torch.Tensor, *, lam: float, B: int, baseline=None, generator=None) -> torch.Tensor:
+    """
+    One draw of the oracle-sensitivity estimator: `continuous_simplex
+    .gradient_estimate` fed the *exact* coordinate sensitivities
+    (`exact_coordinate_sensitivity`) instead of the auxiliary plug-in
+    estimate. Its mean is grad J^lambda(theta) exactly, so averaging many
+    draws and comparing against `env.exact_gradient(theta, lam)` isolates the
+    Monte Carlo term (I) with no sensitivity-estimation term (II) present at
+    all — the same decomposition `oracle_gradient_estimate` provides in the
+    discrete case.
+    """
+    theta = theta.detach()
+    D_exact = exact_coordinate_sensitivity(env, theta)
+    out = env.rollout(theta, lam, B, generator=generator)
+    return continuous_simplex.gradient_estimate(env, theta, out, D_exact, lam, baseline=baseline)
+
+
+def continuous_mean_field_term(env, theta: torch.Tensor, *, lam: float, B: int, reps: int, baseline=None, generator=None) -> dict:
+    """
+    The population-perturbation term alone,
+
+        sum_t S_t^{lambda,theta}(M_t) G_t = sum_t D_t^theta h_t G_t,
+
+    which is exactly what classical REINFORCE omits — and, since
+    E[ghat_simplex] = grad J^lambda when the sensitivity flow is exact, also
+    exactly REINFORCE's own bias (up to the O(lambda^p) perturbation term).
+
+    Estimated as a *paired* difference: both estimators are evaluated on the
+    same rollouts, so the policy-score contribution — which they share
+    sample-for-sample, and which carries most of the variance — cancels
+    identically instead of being differenced across independent batches.
+    That is what makes the term measurable: on the portfolio benchmark the
+    paired difference's standard deviation is ~160x smaller than either
+    estimator's own, turning a quantity that no affordable number of
+    independent replications could resolve into a 4-sigma measurement.
+    `relative_size` reports it against ||grad J^lambda(theta)||.
+    """
+    theta = theta.detach()
+    D_exact = exact_coordinate_sensitivity(env, theta)
+    samples = []
+    for _ in range(reps):
+        out = env.rollout(theta, lam, B, generator=generator)
+        samples.append(
+            continuous_simplex.gradient_estimate(env, theta, out, D_exact, lam, baseline=baseline)
+            - continuous_reinforce.gradient_estimate(env, theta, out, baseline=baseline)
+        )
+    samples = torch.stack(samples)
+    mean, std = samples.mean(dim=0), samples.std(dim=0)
+    perturbed = env.exact_gradient(theta, lam)
+    return {
+        "mean": mean,
+        "se": std / reps**0.5,
+        "std": std,
+        "perturbed_gradient": perturbed,
+        "relative_size": mean.norm() / perturbed.norm(),
+    }
+
+
+def continuous_sensitivity_error(env, theta: torch.Tensor, *, eta: float, n: int, reps: int, generator=None) -> dict:
+    """
+    Empirical bias/variance of `continuous_simplex.estimate_sensitivity_flow`
+    against the exact D_t^theta (`exact_coordinate_sensitivity`), from `reps`
+    independent auxiliary batches at fixed (eta, n). Validates the two
+    quantities the estimator's analysis is written in terms of: the smoothing
+    remainder R_t^{eta,theta} (eq. continuous-coordinate-smoothing-remainder),
+    which shrinks with eta, and the O(1/n) Monte Carlo error of the reusable
+    batch. Returns per-t `bias_norm`, `bias_se`, `variance` and `mse` (each
+    shape (T+1,)), plus their sums over t.
+    """
+    theta = theta.detach()
+    exact = exact_coordinate_sensitivity(env, theta)
+
+    total = torch.zeros_like(exact)
+    total_sq = torch.zeros_like(exact)
+    for _ in range(reps):
+        sample = continuous_simplex.estimate_sensitivity_flow(env, theta, n, eta, generator=generator)
+        total += sample
+        total_sq += sample**2
+
+    mean = total / reps
+    bias_norm = (mean - exact).flatten(1).norm(dim=-1)  # (T+1,)
+    # Population (ddof=0) variance from the running moments, so that
+    # mse = bias_norm**2 + variance holds exactly.
+    variance = (total_sq / reps - mean**2).clamp_min(0.0).flatten(1).sum(dim=-1)
+    return {
+        "exact": exact,
+        "mean": mean,
+        "bias_norm": bias_norm,
+        "bias_se": (variance / reps).sqrt(),
+        "variance": variance,
+        "mse": bias_norm**2 + variance,
+        "total_bias_norm": (mean - exact).norm(),
+        "total_mse": (bias_norm**2 + variance).sum(),
+    }
+
+
+def continuous_perturbation_coverage(env, theta: torch.Tensor, *, lam: float, n_samples: int, generator=None) -> list[dict]:
+    """
+    The continuous-state counterpart of `perturbation_coverage`'s
+    d_TV(M^lambda,mu) <= lambda check. Here the perturbation is the transport
+    (Id+lambda*f)#mu with f(x)=zeta*x+beta, so for a Gaussian nominal law
+    N(mu_t,Sigma_t) the transported law is N((1+lambda*zeta)mu_t+lambda*beta,
+    (1+lambda*zeta)^2 Sigma_t) and
+
+        W_2^2(M_t^lambda, mu_t) = lambda^2 (zeta*mu_t+beta)^2 + lambda^2 zeta^2 Sigma_t
+
+    exactly. The reference's own almost-sure bound (eq.
+    continuous-transport-W2-bound, with C_phi=1 for the affine directions
+    phi(x)=(x,1)) is
+
+        W_2(M_t^lambda, mu_t) <= lambda*|Z_t|*sqrt(1+mu_t^2+Sigma_t),   Z_t=(zeta,beta),
+
+    which `within_bound` checks on every single draw, exactly as the discrete
+    check does for d_TV<=lambda. `mean_W2_sq` should match its closed form
+    lambda^2*rho^2*(mu_t^2+1+Sigma_t) — the O(lambda^2) of eq.
+    continuous-coordinate-W2-bound. One entry per t=0,...,T.
+    """
+    theta = theta.detach()
+    rho, dtype, device = env.config.rho, env.dtype, env.device
+    mu, Sigma = env.forward_moments(theta, 0.0)
+
+    results = []
+    for t in range(theta.shape[0] + 1):
+        zeta = rho * torch.randn(n_samples, dtype=dtype, device=device, generator=generator)
+        beta = rho * torch.randn(n_samples, dtype=dtype, device=device, generator=generator)
+        W2_sq = lam**2 * ((zeta * mu[t] + beta) ** 2 + zeta**2 * Sigma[t])
+        bound = lam * torch.sqrt((zeta**2 + beta**2) * (1.0 + mu[t] ** 2 + Sigma[t]))
+        W2 = W2_sq.sqrt()
+        results.append({
+            "t": t,
+            "mu": mu[t],
+            "mean_W2": W2.mean(),
+            "max_W2": W2.max(),
+            "mean_W2_sq": W2_sq.mean(),
+            "predicted_mean_W2_sq": lam**2 * rho**2 * (mu[t] ** 2 + 1.0 + Sigma[t]),
+            "mean_bound": bound.mean(),
+            "within_bound": bool((W2 <= bound + 1e-12).all()),
+        })
+    return results
+
+
+def continuous_state_marginal_stability(env, theta: torch.Tensor, *, lam: float, n_samples: int, generator=None) -> dict:
+    """
+    Stability of the perturbed state marginal nu_t^{lambda,theta} =
+    Law(X_t^{lambda,theta}) around the nominal mu_t^theta, t=0,...,T,
+    estimated from `n_samples` perturbed trajectories and compared against
+    the exact perturbed moments (`env.forward_moments(theta, lam)`). The
+    continuous analogue of `state_marginal_stability`'s d_TV(nu_t,mu_t)
+    check: the mean gap is exactly zero for both benchmarks (the perturbation
+    is centered, so `forward_moments`' mean recursion does not depend on
+    lambda at all) and the whole effect is a variance inflation
+    Sigma_t^{lambda}-Sigma_t^0 that compounds forward through the horizon.
+    Returns mean/variance of the empirical marginal alongside both exact
+    recursions, all of shape (T+1,).
+    """
+    theta = theta.detach()
+    mu_0, Sigma_0 = env.forward_moments(theta, 0.0)
+    mu_lam, Sigma_lam = env.forward_moments(theta, lam)
+    X = env.rollout(theta, lam, n_samples, generator=generator)["X"]  # (T+1,n_samples)
+    return {
+        "empirical_mean": X.mean(dim=1),
+        "empirical_variance": X.var(dim=1),
+        "exact_mean": mu_lam,
+        "exact_variance": Sigma_lam,
+        "nominal_mean": mu_0,
+        "nominal_variance": Sigma_0,
+        "variance_inflation": Sigma_lam - Sigma_0,
+    }
+
+
+def continuous_generalization_eval(env, theta: torch.Tensor, scenarios: list[dict], *, lam: float = 0.0) -> list[dict]:
+    """
+    Evaluate a trained theta exactly under each scenario without retraining
+    (context.md's "generalization" axis), the continuous counterpart of
+    `generalization_eval`. Each scenario is a dict with a `name` and an
+    optional `env` (a substitute environment instance, e.g. a different mu0,
+    perturbation intensity rho, mean-field coupling or model
+    misspecification) and `lam`. No horizon scenario: theta is
+    horizon-specific for both continuous benchmarks (see
+    `mfc.environments.lq`'s module docstring). Evaluation is closed-form, so
+    these numbers carry no Monte Carlo error.
+    """
+    theta = theta.detach()
+    return [{"name": sc["name"], "J": sc.get("env", env).exact_objective(theta, sc.get("lam", lam))} for sc in scenarios]
+
+
+def run_continuous_diagnostics(env_name: str, alg_name: str, config_name: str, *, output_dir: str = str(ROOT / "runs")) -> dict:
+    """
+    `run_diagnostics`' counterpart for the continuous benchmarks: load every
+    saved run for this (env, alg, config), group by (T, lam), and compute the
+    diagnostics that are beyond training scope — theta bias/variance across
+    seeds against the known optimum, J^lambda vs J^0, gradient bias/std/MSE
+    against the exact oracles, sensitivity-estimator error, and the W_2
+    perturbation-coverage check. The perturbation-dependent entries are
+    skipped for a run with `lam=None` (reinforce, trained on the nominal
+    process), whose gradient diagnostics are computed at lam=0. Saved to
+    runs/<env>/<config>/<alg>_diagnostics.pt for the notebooks to load.
+    """
+    env = CONTINUOUS_ENVIRONMENTS[env_name](device="cpu")
+    runs = load_runs(env_name, alg_name, config_name, output_dir=output_dir, device="cpu")
+    if not runs:
+        print(f"no saved runs found under {output_dir}/{env_name}/{config_name}/{alg_name}_*.pt; run scripts/train.py first")
+        return {}
+
+    cfg = runs[0]["config"]
+    optimal = env.riccati_optimal if hasattr(env, "riccati_optimal") else env.optimal_theta
+
+    diagnostics = {}
+    for key, group in group_by(runs, "T", "lam").items():
+        T, lam = key
+        theta_star = optimal(T)
+        theta_finals = torch.stack([r["theta_final"] for r in group])
+        theta = group[0]["theta_final"]
+        generator = torch.Generator(device="cpu").manual_seed(0)
+
+        # lam is None for a run of an algorithm with no perturbation scale
+        # (reinforce, trained on the nominal process — see scripts/train.py's
+        # ALGORITHMS_WITH_PERTURBATION_SCALE). Its estimator is then the lam=0
+        # one, and the perturbation's own diagnostics have nothing to describe.
+        entry = {
+            "T": T,
+            "lam": lam,
+            "n_seeds": len(group),
+            "optimal_theta": theta_star,
+            "optimal_J": env.exact_objective(theta_star, 0.0),
+            "theta": theta_diagnostics(theta_finals.flatten(1), theta_star.flatten()),
+        }
+        if lam is not None:
+            entry["objective_gap"] = continuous_objective_gap(env, theta, lam=lam, n_samples=2000, generator=generator)
+            entry["state_marginal"] = continuous_state_marginal_stability(env, theta, lam=lam, n_samples=2000, generator=generator)
+            entry["perturbation_coverage"] = continuous_perturbation_coverage(env, theta, lam=lam, n_samples=5000, generator=generator)
+        if alg_name in ("simplex", "reinforce"):
+            B = cfg.B if alg_name == "simplex" else cfg.reinforce_B_equal_budget()
+            entry["gradient"] = continuous_gradient_diagnostics(
+                env, theta, lam=lam or 0.0, B=B, n_aux=cfg.n_aux, reps=40, algorithm=alg_name, baseline=cfg.baseline, generator=generator
+            )
+        if alg_name == "simplex":
+            entry["sensitivity"] = continuous_sensitivity_error(env, theta, eta=lam, n=cfg.n_aux, reps=40, generator=generator)
+
+        diagnostics[key] = entry
+        summary = f"|theta-theta*|={(theta - theta_star).norm().item():.4f}"
+        if "objective_gap" in entry:
+            summary = f"J^lam-J^0={entry['objective_gap']['gap'].item():+.4g}, " + summary
+        if "gradient" in entry:
+            summary += f", ||grad bias||={entry['gradient']['bias'].norm().item():.4g} (se {entry['gradient']['bias_se'].norm().item():.4g})"
+        print(f"[{env_name}/{config_name}] T={T} lam={lam}: {summary}")
+
+    out_path = Path(output_dir) / env_name / config_name / f"{alg_name}_diagnostics.pt"
+    torch.save(diagnostics, out_path)
+    print(f"saved diagnostics to {out_path}")
+    return diagnostics
+
+
+# --------------------------------------------------------------------------
 # Aggregator + CLI
 # --------------------------------------------------------------------------
 
@@ -643,12 +1020,15 @@ def run_diagnostics(env_name: str, alg_name: str, config_name: str, *, output_di
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--env", default="twostate", choices=sorted(ENVIRONMENTS))
+    parser.add_argument("--env", default="twostate", choices=sorted(set(ENVIRONMENTS) | set(CONTINUOUS_ENVIRONMENTS)))
     parser.add_argument("--alg", default="simplex")
     parser.add_argument("--config", default="smoke", choices=["main", "mid", "smoke"])
     parser.add_argument("--output-dir", default=str(ROOT / "runs"))
     args = parser.parse_args()
 
+    if args.env in CONTINUOUS_ENVIRONMENTS:
+        run_continuous_diagnostics(args.env, args.alg, args.config, output_dir=args.output_dir)
+        return
     run_diagnostics(args.env, args.alg, args.config, output_dir=args.output_dir)
 
 

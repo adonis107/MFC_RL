@@ -22,7 +22,7 @@
 # Examples:
 #   scripts/train_all.sh 4 --env twostate --alg simplex --config main --dtype float32
 #   scripts/train_all.sh 4 --env twostate --alg mfreinforce --config main --dtype float32
-#   scripts/train_all.sh 1 --env lq --alg exact_gradient --config main
+#   scripts/train_all.sh 4 --env lq --alg simplex --config main
 #
 # Run once per algorithm (the full main sweep is `algorithms x everything
 # --list enumerates`); each invocation's --list output is independent, so

@@ -14,7 +14,11 @@ reference reports epsilon in {1.0, 2.0} both giving "more stable training
 and faster convergence" than smaller values, without a clear winner between
 the two (Figure 5 just shows both trajectories differ qualitatively) — kept
 here at the more moderate 1.0, as for cybersecurity; the reference's full
-grid is epsilon in {0.5, 0.75, 1.0, 2.0}.
+grid is epsilon in {0.5, 0.75, 1.0, 2.0}. The lambda grid is trimmed to
+{0.1, 0.2, 0.4} (the reference's own grid also carries 0.8) to keep the paid
+run's job count down, as for cybersecurity: 0.8 is far outside the
+small-perturbation regime the theory covers, and two-state's `main` still
+sweeps the full grid including it.
 
 Unlike two-state, mu0 is *not* resampled from a RunConfig-parametrized range
 each training iteration: it is always mu0~Dirichlet(1,...,1) (10-dim), a
@@ -30,7 +34,14 @@ identical (B, n_aux) for simplex and mfreinforce here — no budget-matching
 adjustment — but this repo adds an "equal_budget" mode as for two-state (see
 configs/twostate.py's module docstring for the full derivation): the
 complexity formulas are generic in (B, n_aux, T), so they are reused
-verbatim.
+verbatim. `main` runs *only* budget_mode="equal_budget" and *only*
+flow="particle" (the empirical population-flow estimate, not the exact
+recursion), as cybersecurity's and advertising's do — two-state's `main` is
+the only place the exact flow and the equal-parameters regime are compared.
+This is the expensive one: at B=500, n_aux=10, T=5 the target is
+C_logit(5)/5 = 15500 per step, so simplex trains at B=15490 and reinforce at
+B=15500, ~31x the reference's own batch, against a ~76.6k-parameter policy
+MLP for n_train=100_000 iterations.
 """
 
 from __future__ import annotations
@@ -49,7 +60,7 @@ class DistributionPlanningRunConfig:
     particle_size: int = 500  # N~ trajectories/step for the particle population estimate (matches B)
 
     # perturbation grid (reference "Compared perturbation schemes")
-    lambdas: tuple[float, ...] = (0.1, 0.2, 0.4, 0.8)  # simplex perturbation scale
+    lambdas: tuple[float, ...] = (0.1, 0.2, 0.4)  # simplex perturbation scale (reference also has 0.8; see module docstring)
     epsilon: float = 1.0  # logit (MF-REINFORCE) perturbation scale
     sigma: float = 1.0  # simplex Gaussian perturbation std
 
@@ -84,7 +95,11 @@ class DistributionPlanningRunConfig:
         return self.equal_budget_target(T)
 
 
-MAIN = DistributionPlanningRunConfig(name="main")
+MAIN = DistributionPlanningRunConfig(
+    name="main",
+    budget_modes=("equal_budget",),
+    flows=("particle",),
+)
 
 # mid/smoke also shrink B (unlike twostate/cybersecurity's tiers, which only
 # shrink n_train), to keep a dev iteration quick: the policy MLP here has

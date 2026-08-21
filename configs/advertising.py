@@ -12,7 +12,11 @@ gives a formula but not a number — they're set here to match two-state's
 own values (same state/action-space scale: |X|=|A|=2), used as "main".
 mid/smoke shrink n_train for faster iteration. epsilon is fixed (not swept,
 matching this repo's convention elsewhere) at 1.0, the mid-point of no
-reference-stated grid for this benchmark either.
+reference-stated grid for this benchmark either. The lambda grid is trimmed
+to {0.1, 0.2, 0.4} (the reference's own grid also carries 0.8) to keep the
+paid run's job count down, as for cybersecurity and distribution planning:
+0.8 is far outside the small-perturbation regime the theory covers, and
+two-state's `main` still sweeps the full grid including it.
 
 Unlike two-state, mu0 is *not* resampled from a RunConfig-parametrized
 range: p0~U([0.05,0.95]) is a fixed model constant (`mfc.environments.
@@ -33,7 +37,12 @@ every algorithm's `gamma=` keyword, as for cybersecurity.
 Equal-budget allocation. As elsewhere, this repo adds an "equal_budget"
 mode (see configs/twostate.py's module docstring for the full derivation):
 the complexity formulas are generic in (B, n_aux, T), so they are reused
-verbatim.
+verbatim. `main` runs *only* budget_mode="equal_budget" and *only*
+flow="particle" (the empirical population-flow estimate, not the exact
+recursion), as cybersecurity's and distribution planning's do — two-state's
+`main` is the only place the exact flow and the equal-parameters regime are
+compared. At B=200, n_aux=10, T=5 the target is C_logit(5)/5 = 6200 per
+step, so simplex trains at B=6190 and reinforce at B=6200.
 """
 
 from __future__ import annotations
@@ -52,7 +61,7 @@ class AdvertisingRunConfig:
     particle_size: int = 200  # N~ trajectories/step for the particle population estimate (matches B)
 
     # perturbation grid (reference "Perturbation schemes")
-    lambdas: tuple[float, ...] = (0.1, 0.2, 0.4, 0.8)  # simplex perturbation scale
+    lambdas: tuple[float, ...] = (0.1, 0.2, 0.4)  # simplex perturbation scale (reference also has 0.8; see module docstring)
     epsilon: float = 1.0  # logit (MF-REINFORCE) perturbation scale
     sigma: float = 1.0  # simplex Gaussian perturbation std
 
@@ -87,7 +96,11 @@ class AdvertisingRunConfig:
         return self.equal_budget_target(T)
 
 
-MAIN = AdvertisingRunConfig(name="main")
+MAIN = AdvertisingRunConfig(
+    name="main",
+    budget_modes=("equal_budget",),
+    flows=("particle",),
+)
 
 MID = AdvertisingRunConfig(
     name="mid",

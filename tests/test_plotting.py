@@ -146,3 +146,13 @@ def test_plot_horizon_scaling_overlays_series_on_shared_axes():
     viz.plot_horizon_scaling({1: -0.5, 2: -0.8, 5: -1.2}, label="b", color_index=1, ax=ax)
     labels = [line.get_label() for line in ax.lines]
     assert "a" in labels and "b" in labels
+
+
+def test_plot_validation_curve_names_the_algorithm_when_several_carry_a_lambda():
+    """Both continuous-state algorithms are trained on the perturbed
+    process, so both store a lambda; labeling by lambda alone would give two
+    different lines the same legend entry."""
+    runs = [_fake_run(0.2, 0, alg="simplex"), _fake_run(0.2, 0, alg="reinforce")]
+    fig, ax = viz.plot_validation_curve(runs)
+    labels = sorted(line.get_label() for line in ax.lines)
+    assert labels == ["reinforce λ=0.2", "simplex λ=0.2"]

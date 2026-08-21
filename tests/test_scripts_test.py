@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+import pytest
 import torch
 
 from configs.twostate import TwoStateRunConfig
 from mfc.algorithms import simplex
+from mfc.environments.lq import LQ, LQConfig
 from mfc.environments.twostate import TwoState, TwoStateConfig
 from scripts.test import (
     constant_policy_fn,
+    continuous_generalization_eval,
+    continuous_gradient_diagnostics,
+    continuous_mean_field_term,
+    continuous_objective_gap,
+    continuous_oracle_gradient_estimate,
+    continuous_perturbation_coverage,
+    continuous_sensitivity_error,
+    continuous_state_marginal_stability,
+    exact_coordinate_sensitivity,
     exact_gradient,
     exact_sensitivity_flow,
     generalization_eval,
@@ -21,13 +32,14 @@ from scripts.test import (
     policy_error,
     population_tracking_error,
     rollout,
+    run_continuous_diagnostics,
     run_diagnostics,
     sensitivity_estimation_error,
     state_distribution,
     state_marginal_stability,
     theta_diagnostics,
 )
-from scripts.train import run_all
+from scripts.train import run_all, run_continuous
 
 torch.set_default_dtype(torch.float64)
 
@@ -316,3 +328,158 @@ def test_run_diagnostics_skips_simplex_only_checks_for_other_algorithms(tmp_path
     entry = next(iter(diagnostics.values()))
     assert "objective_gap" not in entry
     assert "policy_error" in entry  # the algorithm-agnostic diagnostics still run
+
+
+# --------------------------------------------------------------------------
+# Continuous-state diagnostics (`lq`, `portfolio`)
+# --------------------------------------------------------------------------
+
+
+def test_exact_coordinate_sensitivity_matches_finite_differences():
+    env = LQ(device="cpu")
+    T = 3
+    theta = 0.2 * torch.randn(T, 2, dtype=env.dtype, device="cpu", generator=torch.Generator(device="cpu").manual_seed(0))
+    D = exact_coordinate_sensitivity(env, theta)
+    assert D.shape == (T + 1, T, 2)
+    assert D[0].abs().max().item() == 0.0  # mu_0 does not depend on theta
+
+    eps = 1e-6
+    for t in (1, T):
+        for i in range(T):
+            for j in range(2):
+                bumped = theta.clone()
+                bumped[i, j] += eps
+                fd = (env.forward_moments(bumped, 0.0)[0][t] - env.forward_moments(theta, 0.0)[0][t]) / eps
+                assert D[t, i, j].item() == pytest.approx(fd.item(), abs=1e-5)
+
+
+def test_continuous_objective_gap_matches_the_closed_forms_and_scales_as_lambda_squared():
+    env = LQ(device="cpu")
+    theta = env.riccati_optimal(3)
+    generator = torch.Generator(device="cpu").manual_seed(0)
+    gaps = {}
+    for lam in (0.1, 0.2, 0.4):
+        out = continuous_objective_gap(env, theta, lam=lam, n_samples=20_000, generator=generator)
+        assert out["J"].item() == pytest.approx(env.exact_objective(theta, 0.0).item())
+        # the Monte Carlo column is a check on the simulator against the closed form
+        assert abs(out["J_lambda_mean"].item() - out["J_lambda"].item()) < 4.0 * out["J_lambda_se"].item()
+        gaps[lam] = out["gap"].item()
+    for lam in (0.2, 0.4):
+        assert gaps[lam] / gaps[lam / 2] == pytest.approx(4.0, rel=1e-6)  # exact O(lambda^2), not just a fitted rate
+
+
+def test_continuous_gradient_diagnostics_bias_decomposition_is_exact():
+    env = LQ(device="cpu")
+    theta = 0.2 * torch.randn(2, 2, dtype=env.dtype, device="cpu", generator=torch.Generator(device="cpu").manual_seed(0))
+    gd = continuous_gradient_diagnostics(
+        env, theta, lam=0.2, B=64, n_aux=32, reps=8, baseline="loo", generator=torch.Generator(device="cpu").manual_seed(0)
+    )
+    assert torch.allclose(gd["oracle_gradient"], env.exact_gradient(theta, 0.0))
+    assert torch.allclose(gd["perturbed_gradient"], env.exact_gradient(theta, 0.2))
+    assert torch.allclose(gd["bias"], gd["perturbation_bias"] + gd["estimation_bias"], atol=1e-10)
+
+
+def test_continuous_oracle_gradient_estimate_bias_shrinks_as_lambda_shrinks():
+    """With the exact sensitivity flow, E[ghat] = grad J^lambda exactly, so
+    its distance to grad J^0 is the perturbation bias alone — O(lambda^2) for
+    this centered perturbation."""
+    env = LQ(device="cpu")
+    theta = 0.2 * torch.randn(2, 2, dtype=env.dtype, device="cpu", generator=torch.Generator(device="cpu").manual_seed(0))
+    target = env.exact_gradient(theta, 0.0)
+    biases = {}
+    for lam in (0.1, 0.4):
+        generator = torch.Generator(device="cpu").manual_seed(0)
+        samples = torch.stack(
+            [continuous_oracle_gradient_estimate(env, theta, lam=lam, B=20_000, baseline="loo", generator=generator) for _ in range(20)]
+        )
+        biases[lam] = (samples.mean(dim=0) - target).norm().item()
+    assert biases[0.1] < biases[0.4]
+
+
+def test_continuous_sensitivity_error_shrinks_with_more_auxiliary_samples():
+    env = LQ(device="cpu")
+    theta = 0.2 * torch.randn(3, 2, dtype=env.dtype, device="cpu", generator=torch.Generator(device="cpu").manual_seed(0))
+    errs = {}
+    for n in (50, 5_000):
+        out = continuous_sensitivity_error(env, theta, eta=0.2, n=n, reps=10, generator=torch.Generator(device="cpu").manual_seed(0))
+        assert out["bias_norm"].shape == (theta.shape[0] + 1,)
+        assert torch.allclose(out["mse"], out["bias_norm"] ** 2 + out["variance"])
+        errs[n] = out["total_mse"].item()
+    assert errs[5_000] < errs[50]
+
+
+def test_continuous_perturbation_coverage_respects_the_W2_bound():
+    """The transport analogue of d_TV(M^lambda,mu) <= lambda: every single
+    draw must satisfy W_2 <= lambda*|Z|*sqrt(1+mu^2+Sigma), and the mean
+    squared distance must match its closed form."""
+    env = LQ(device="cpu")
+    theta = env.riccati_optimal(3)
+    for lam in (0.1, 0.5):
+        results = continuous_perturbation_coverage(env, theta, lam=lam, n_samples=20_000, generator=torch.Generator(device="cpu").manual_seed(0))
+        assert len(results) == 4
+        for r in results:
+            assert r["within_bound"]
+            assert r["mean_W2_sq"].item() == pytest.approx(r["predicted_mean_W2_sq"].item(), rel=0.05)
+
+
+def test_continuous_state_marginal_stability_matches_the_exact_moment_recursions():
+    env = LQ(device="cpu")
+    theta = env.riccati_optimal(3)
+    out = continuous_state_marginal_stability(env, theta, lam=0.4, n_samples=200_000, generator=torch.Generator(device="cpu").manual_seed(0))
+    assert torch.allclose(out["exact_mean"], out["nominal_mean"])  # the perturbation is centered: mu is exactly lambda-free
+    assert (out["variance_inflation"] >= 0).all()
+    assert torch.allclose(out["empirical_mean"], out["exact_mean"], atol=0.05)
+    assert torch.allclose(out["empirical_variance"], out["exact_variance"], rtol=0.05)
+
+
+def test_continuous_generalization_eval_matches_exact_objective_and_reacts_to_overrides():
+    env = LQ(device="cpu")
+    theta = env.riccati_optimal(3)
+    results = continuous_generalization_eval(
+        env,
+        theta,
+        [{"name": "baseline"}, {"name": "mu0 x 2", "env": LQ(LQConfig(mu0=2 * env.config.mu0), device="cpu")}, {"name": "lam=0.8", "lam": 0.8}],
+        lam=0.0,
+    )
+    assert results[0]["J"].item() == pytest.approx(env.exact_objective(theta, 0.0).item())
+    assert results[1]["J"].item() > results[0]["J"].item()  # a larger population mean costs more
+    assert results[2]["J"].item() > results[0]["J"].item()  # so does a stronger perturbation
+
+
+def test_run_continuous_diagnostics_end_to_end(tmp_path):
+    from configs.lq import LQRunConfig
+    import scripts.train as train_mod
+
+    cfg = LQRunConfig(name="tiny", horizons=(2,), lambdas=(0.2,), n_train=5, seeds=(0, 1), B=16, n_aux=8, validate_every=2)
+    train_mod.CONFIGS.setdefault("lq", {})["tiny_test"] = cfg
+
+    run_continuous("lq", "simplex", "tiny_test", output_dir=str(tmp_path))
+    runs = load_runs("lq", "simplex", "tiny_test", output_dir=str(tmp_path), device="cpu")
+    assert len(runs) == 2
+
+    diagnostics = run_continuous_diagnostics("lq", "simplex", "tiny_test", output_dir=str(tmp_path))
+    assert (tmp_path / "lq" / "tiny_test" / "simplex_diagnostics.pt").exists()
+    entry = diagnostics[(2, 0.2)]
+    assert entry["n_seeds"] == 2
+    assert entry["theta"]["mean"].shape == (4,)  # theta is (T,2), flattened for the across-seed statistics
+    for key in ("objective_gap", "gradient", "sensitivity", "perturbation_coverage", "state_marginal"):
+        assert key in entry
+
+
+def test_continuous_mean_field_term_matches_reinforces_own_bias():
+    """The paired difference measures exactly what REINFORCE omits, so it
+    must agree (up to sign and the O(lambda^p) perturbation term) with
+    REINFORCE's directly-measured bias — while being far less noisy."""
+    env = LQ(device="cpu")
+    T, lam, reps, B = 5, 0.2, 60, 2_000
+    theta_star = env.riccati_optimal(T)
+
+    mf = continuous_mean_field_term(env, theta_star, lam=lam, B=B, reps=reps, baseline="loo", generator=torch.Generator(device="cpu").manual_seed(0))
+    gd = continuous_gradient_diagnostics(
+        env, theta_star, lam=lam, B=B, reps=reps, algorithm="reinforce", baseline="loo", generator=torch.Generator(device="cpu").manual_seed(1)
+    )
+
+    assert mf["mean"].norm().item() > 4.0 * mf["se"].norm().item()  # resolved
+    assert mf["se"].norm().item() < gd["bias_se"].norm().item()  # and less noisy than the direct measurement
+    combined_se = (mf["se"] ** 2 + gd["bias_se"] ** 2).sum().sqrt().item()
+    assert (mf["mean"] + gd["bias"]).norm().item() < 4.0 * combined_se  # bias = -term

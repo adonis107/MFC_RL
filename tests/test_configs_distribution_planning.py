@@ -15,7 +15,7 @@ def test_training_protocol_matches_reference():
         assert cfg.horizons == (5,)
         assert cfg.mu0_val == tuple([0.1] * 10)
         assert cfg.sigma == 1.0
-        assert cfg.lambdas == (0.1, 0.2, 0.4, 0.8)
+        assert cfg.lambdas == (0.1, 0.2, 0.4)  # trimmed from the reference's (0.1, 0.2, 0.4, 0.8); see the module docstring
         assert cfg.epsilon == 1.0
 
 
@@ -25,6 +25,11 @@ def test_main_covers_the_full_comparison_surface():
     assert len(set(MAIN.seeds)) == 5  # distinct seeds
     assert MAIN.n_train == 100_000
     assert MAIN.B == 500  # the reference's own value; only mid/smoke shrink it
+    # only the budget-matched, particle-flow regime, as for cybersecurity and
+    # advertising; two-state's main is the only one comparing budget modes and
+    # flows against each other
+    assert MAIN.budget_modes == ("equal_budget",)
+    assert MAIN.flows == ("particle",)
 
 
 def test_mid_and_smoke_are_single_seed_reductions_of_main():

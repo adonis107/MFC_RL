@@ -62,7 +62,17 @@ theta trajectory plus validation history to `runs/<env>/<config>/...pt` so
 that downstream diagnostics (scripts/test.py, notebooks) never need to
 retrain.
 
-All three algorithms are implemented, for both flows and both budget modes.
+The continuous-state benchmarks (`lq`, `portfolio`) take a different path
+through this module: `run_continuous` drives `mfc.algorithms.continuous.train`
+over a (T, lam, seed) grid with no budget_mode/flow axis, since their
+allocation is equal-budget by construction and their nominal population
+coordinate flow is exact (see `configs/lq.py`). Their algorithms are
+`mfc.algorithms.continuous.ALGORITHMS`: "simplex" (the continuous-state
+simplex-perturbed MF-REINFORCE estimator), "reinforce" (its ablation), and
+"exact_gradient" (the closed-form oracle, trainable but not part of the
+comparison).
+
+All three discrete algorithms are implemented, for both flows and both budget modes.
 Under budget_mode="equal_budget", simplex's and reinforce's main batch B is
 horizon-dependent (`cfg.simplex_B_equal_budget(T)` / `cfg.reinforce_B_equal_budget(T)`)
 — see configs/twostate.py's module docstring: mfreinforce's true per-step
@@ -110,7 +120,7 @@ from configs.portfolio import SMOKE as PORTFOLIO_SMOKE
 from configs.twostate import MAIN as TWOSTATE_MAIN
 from configs.twostate import MID as TWOSTATE_MID
 from configs.twostate import SMOKE as TWOSTATE_SMOKE
-from mfc.algorithms import _common, lq as lq_algorithms, mfreinforce, portfolio as portfolio_algorithms, reinforce, simplex
+from mfc.algorithms import _common, continuous, mfreinforce, reinforce, simplex
 from mfc.environments.advertising import Advertising
 from mfc.environments.cybersecurity import CyberSecurity
 from mfc.environments.distribution_planning import DistributionPlanning
@@ -129,17 +139,26 @@ CONFIGS = {
     "portfolio": {"main": PORTFOLIO_MAIN, "mid": PORTFOLIO_MID, "smoke": PORTFOLIO_SMOKE},
 }
 
-# Continuous-state environments (Gaussian/non-Gaussian scalar state, closed-form
-# gradient — see mfc.environments.lq's module docstring for why these can't
-# share the discrete ENVIRONMENTS/STEP_FACTORIES machinery above): each maps
-# to its (EnvironmentClass, algorithms module) pair, used generically by
-# `run_continuous`/`list_continuous_experiments` instead of one bespoke
-# runner per environment.
-CONTINUOUS_ENVIRONMENTS = {"lq": (LQ, lq_algorithms), "portfolio": (Portfolio, portfolio_algorithms)}
+# Continuous-state environments (Gaussian/non-Gaussian scalar state — see
+# mfc.environments.lq's module docstring for why these can't share the
+# discrete ENVIRONMENTS/STEP_FACTORIES machinery above). All of them are
+# driven by the single `mfc.algorithms.continuous.train` loop, whose
+# algorithms are `continuous.ALGORITHMS`.
+CONTINUOUS_ENVIRONMENTS = {"lq": LQ, "portfolio": Portfolio}
 
 SUPPORTED_BUDGET_MODES = {"equal_parameters", "equal_budget"}
 SUPPORTED_FLOWS = {"exact", "particle"}
-ALGORITHMS_WITH_PERTURBATION_SCALE = {"simplex"}  # reinforce has no lambda; sweeping it would just retrain redundantly
+# Which algorithms are actually trained once per lambda. simplex's whole
+# construction is parametrized by it; the continuous benchmarks'
+# exact_gradient genuinely descends on grad J^lambda, so its optimum
+# theta^{lambda,*} moves with lambda too. reinforce is not on this list in
+# either state space: the perturbation exists only to make the mean-field
+# sensitivity term available through a likelihood ratio, and an algorithm
+# that drops that term gains nothing from injecting it — it would just be
+# optimizing J^lambda instead of J, with extra variance, at 5x the jobs. It
+# is therefore trained on the *nominal* process (lambda=0) and recorded with
+# lam=None, exactly as the discrete `reinforce.py` already was.
+ALGORITHMS_WITH_PERTURBATION_SCALE = {"simplex", "exact_gradient"}
 
 # Environment-specific per-iteration initial-law sampling ("Training
 # protocol" for each benchmark): two-state resamples mu0(1)~U([mu0_low,
@@ -625,16 +644,29 @@ def run_all(
     return results
 
 
-def list_continuous_experiments(cfg, *, T: int | None = None, lam: float | None = None, seed: int | None = None) -> list[tuple[int, float, int]]:
+def list_continuous_experiments(
+    cfg, alg_name: str, *, T: int | None = None, lam: float | None = None, seed: int | None = None
+) -> list[tuple[int, float | None, int]]:
     """The full experiment grid for a CONTINUOUS_ENVIRONMENTS config, as
-    (T, lam, seed) tuples, mirroring `list_experiments`'s override
-    semantics (any axis given here is pinned; every omitted axis sweeps its
-    full config range). No budget_mode/flow axis: `mfc.algorithms.lq`/
-    `mfc.algorithms.portfolio`'s `"exact_gradient"` needs no sampling budget
-    at all, and `"reinforce"` needs only a single batch size `cfg.B`."""
+    (T, lam, seed) tuples, mirroring `list_experiments`'s override semantics
+    (any axis given here is pinned; every omitted axis sweeps its full config
+    range) and its treatment of the perturbation scale: `lam` is None for an
+    algorithm outside ALGORITHMS_WITH_PERTURBATION_SCALE, so reinforce gets
+    one job per (T, seed) rather than one per lambda.
+
+    No budget_mode/flow axis: the continuous configs have a single,
+    always-equal-budget allocation (`cfg.n_aux`/`cfg.B` for simplex,
+    `cfg.reinforce_B_equal_budget()` for reinforce — see `configs/lq.py`),
+    and the population coordinate flow is exact for both benchmarks, so
+    there is no exact-vs-particle flow choice either."""
     horizons = [T] if T is not None else list(cfg.horizons)
-    lambdas = [lam] if lam is not None else list(cfg.lambdas)
     seeds = [seed] if seed is not None else list(cfg.seeds)
+    if alg_name in ALGORITHMS_WITH_PERTURBATION_SCALE:
+        lambdas = [lam] if lam is not None else list(cfg.lambdas)
+    else:
+        if lam is not None:
+            raise ValueError(f"--lam given but algorithm {alg_name!r} has no perturbation scale to sweep")
+        lambdas = [None]
     return [(T_i, lam_i, s) for T_i in horizons for lam_i in lambdas for s in seeds]
 
 
@@ -653,11 +685,16 @@ def run_continuous(
 ) -> list[dict]:
     """
     The runner shared by every CONTINUOUS_ENVIRONMENTS entry (`lq`,
-    `portfolio`) — parallel to `run_all`/`train_run` but for their
-    `algorithms.train`'s closed-form/Monte-Carlo training instead of the
-    discrete STEP_FACTORIES machinery (see `mfc.environments.lq`'s module
-    docstring for why: continuous Gaussian/non-Gaussian scalar state, no
-    `n_states`/`action_probs_fn`). Trained on CPU regardless of CUDA
+    `portfolio`) — parallel to `run_all`/`train_run` but driving
+    `mfc.algorithms.continuous.train` instead of the discrete
+    STEP_FACTORIES machinery (see `mfc.environments.lq`'s module docstring
+    for why: continuous Gaussian/non-Gaussian scalar state, no
+    `n_states`/`action_probs_fn`). The per-algorithm sampling budget comes
+    from the config and is equal-budget by construction: simplex spends
+    (`cfg.n_aux`+`cfg.B`)*T transitions per step and reinforce the same
+    total in one main batch, `cfg.reinforce_B_equal_budget()`*T (context.md:
+    "For all subsequent environments and tests, we must use equal budget").
+    Trained on CPU regardless of CUDA
     availability — their per-step work is all small scalar/(T,B) ops, for
     which GPU kernel-launch overhead dominates (this repo's twostate
     profiling found the same: GPU ~2.3x slower than CPU for tiny-tensor
@@ -669,10 +706,15 @@ def run_continuous(
     """
     if env_name not in CONTINUOUS_ENVIRONMENTS:
         raise ValueError(f"unknown continuous env {env_name!r}; available: {sorted(CONTINUOUS_ENVIRONMENTS)}")
-    if alg_name not in ("exact_gradient", "reinforce"):
-        raise ValueError(f"unknown {env_name} algorithm {alg_name!r}; available: exact_gradient, reinforce")
-    env_cls, algorithms_module = CONTINUOUS_ENVIRONMENTS[env_name]
+    if alg_name not in continuous.ALGORITHMS:
+        raise ValueError(f"unknown {env_name} algorithm {alg_name!r}; available: {', '.join(continuous.ALGORITHMS)}")
+    env_cls = CONTINUOUS_ENVIRONMENTS[env_name]
     cfg = CONFIGS[env_name][config_name]
+    budget = {
+        "simplex": {"B": cfg.B, "n_aux": cfg.n_aux},
+        "reinforce": {"B": cfg.reinforce_B_equal_budget()},
+        "exact_gradient": {},  # closed-form: no sampling at all
+    }[alg_name]
     dtype_t = getattr(torch, dtype) if isinstance(dtype, str) else dtype
 
     env = env_cls(device="cpu", dtype=dtype_t)
@@ -683,8 +725,11 @@ def run_continuous(
     # would silently no-op as "already exists" against a float64 one saved at the same tag
     show_progress = progress_enabled(progress)
     results = []
-    for T_i, lam_i, seed_i in list_continuous_experiments(cfg, T=T, lam=lam, seed=seed):
-        tag = f"{alg_name}_T{T_i}_lam{lam_i}_seed{seed_i}{dtype_tag}"
+    for T_i, lam_i, seed_i in list_continuous_experiments(cfg, alg_name, T=T, lam=lam, seed=seed):
+        # lam_i is None for an algorithm with no perturbation scale (reinforce): it is
+        # trained on the nominal process, and its tag carries no lambda -- same convention
+        # as `experiment_tag` for the discrete benchmarks.
+        tag = f"{alg_name}_T{T_i}{'' if lam_i is None else f'_lam{lam_i}'}_seed{seed_i}{dtype_tag}"
         out_path = out_root / f"{tag}.pt"
         if out_path.exists() and not overwrite:
             print(f"[{env_name}/{config_name}] {tag} ... skipped (already exists)")
@@ -695,10 +740,10 @@ def run_continuous(
         if not show_progress:  # see run_all: self-contained status lines, the bar replaces the start announcement
             print(f"{label} ... started", flush=True)
         generator = torch.Generator(device="cpu").manual_seed(seed_i)
-        result = algorithms_module.train(
-            env, theta0, algorithm=alg_name, n_train=cfg.n_train, lr=cfg.lr, lam=lam_i,
-            B=cfg.B if alg_name == "reinforce" else None, validate_every=cfg.validate_every, generator=generator,
-            progress_desc=tag if show_progress else None,
+        result = continuous.train(
+            env, theta0, algorithm=alg_name, n_train=cfg.n_train, lr=cfg.lr, lam=lam_i if lam_i is not None else 0.0,
+            baseline=cfg.baseline, validate_every=cfg.validate_every, generator=generator,
+            progress_desc=tag if show_progress else None, **budget,
         )
         result.update({"env": env_name, "alg": alg_name, "T": T_i, "lam": lam_i, "seed": seed_i, "dtype": dtype, "config": cfg, "theta0": theta0})
         print(f"{label} ... done in {result['elapsed_seconds']:.1f}s, final validation J={result['validation_J'][-1].item():.4f}")
@@ -710,7 +755,7 @@ def run_continuous(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env", default="twostate", choices=sorted(set(ENVIRONMENTS) | set(CONTINUOUS_ENVIRONMENTS)))
-    parser.add_argument("--alg", default="simplex", choices=sorted(set(STEP_FACTORIES) | {"exact_gradient"}))
+    parser.add_argument("--alg", default="simplex", choices=sorted(set(STEP_FACTORIES) | set(continuous.ALGORITHMS)))
     parser.add_argument("--config", default="smoke", choices=["main", "mid", "smoke"])
     parser.add_argument("--output-dir", default=str(ROOT / "runs"))
     parser.add_argument("--dtype", default="float64", choices=["float32", "float64"])
@@ -747,7 +792,7 @@ def main() -> None:
     if args.list:
         cfg = CONFIGS[args.env][args.config]
         if args.env in CONTINUOUS_ENVIRONMENTS:
-            experiments = [(None, None, T_i, lam_i, seed_i) for T_i, lam_i, seed_i in list_continuous_experiments(cfg, T=args.T, lam=args.lam, seed=args.seed)]
+            experiments = [(None, None, T_i, lam_i, seed_i) for T_i, lam_i, seed_i in list_continuous_experiments(cfg, args.alg, T=args.T, lam=args.lam, seed=args.seed)]
         else:
             experiments, _duplicates, skipped_budget, skipped_flows = list_experiments(cfg, args.alg, budget_mode=args.budget_mode, flow=args.flow, T=args.T, lam=args.lam, seed=args.seed)
             if skipped_budget:

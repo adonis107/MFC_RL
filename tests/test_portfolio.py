@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from mfc.algorithms.portfolio import reinforce_step, train
+from mfc.algorithms.continuous import train
 from mfc.environments.portfolio import Portfolio, PortfolioConfig
 
 
@@ -67,7 +67,7 @@ def test_optimal_theta_k_is_time_homogeneous_for_the_default_config():
     assert (theta_star[:-1, 1] > theta_star[1:, 1]).all()
 
 
-def test_rollout_shapes_and_terminal_time_perturbation():
+def test_rollout_shapes_and_per_replica_perturbation():
     env = Portfolio()
     T = env.config.T
     theta = env.init_theta()
@@ -75,8 +75,12 @@ def test_rollout_shapes_and_terminal_time_perturbation():
     out = env.rollout(theta, lam=0.1, B=64, generator=generator)
     assert out["X"].shape == (T + 1, 64)
     assert out["alpha"].shape == (T, 64)
-    assert out["mu_hat"].shape == (T + 1,)
-    for t in (out["X"], out["alpha"], out["mu_hat"]):
+    assert out["M"].shape == (T + 1, 64)  # one perturbation draw per replica, not one shared across the batch
+    assert out["xi"].shape == (T + 1, 64)
+    assert out["running"].shape == (T, 64)  # identically zero: the mean-variance criterion is purely terminal
+    assert not out["running"].any()
+    assert out["terminal"].shape == (64,)
+    for t in out.values():
         assert not t.requires_grad  # theta is detached throughout rollout
 
 
@@ -100,15 +104,6 @@ def test_sample_returns_student_t_matches_configured_moments_but_is_heavier_tail
     assert kurtosis > 2.0
 
 
-def test_reinforce_step_gradient_is_nonzero_and_finite():
-    env = Portfolio()
-    theta = env.init_theta().clone().requires_grad_(True)
-    generator = torch.Generator(device=env.device).manual_seed(0)
-    g = reinforce_step(env, theta, lam=0.1, B=128, generator=generator)
-    assert torch.isfinite(g).all()
-    assert g.abs().max().item() > 0.0
-
-
 def test_train_exact_gradient_converges_close_to_the_optimum():
     env = Portfolio()
     theta0 = env.init_theta()
@@ -118,11 +113,12 @@ def test_train_exact_gradient_converges_close_to_the_optimum():
     assert result["validation_J"][-1].item() > 0.99 * J_star
 
 
-def test_train_reinforce_runs_and_returns_expected_fields():
+@pytest.mark.parametrize("algorithm,kwargs", [("reinforce", {"B": 32}), ("simplex", {"B": 32, "n_aux": 16})])
+def test_train_runs_and_returns_expected_fields(algorithm, kwargs):
     env = Portfolio()
     theta0 = env.init_theta()
     generator = torch.Generator(device=env.device).manual_seed(0)
-    result = train(env, theta0, algorithm="reinforce", n_train=20, lr=0.01, lam=0.1, B=32, validate_every=5, generator=generator)
+    result = train(env, theta0, algorithm=algorithm, n_train=20, lr=0.01, lam=0.1, validate_every=5, generator=generator, **kwargs)
     T = env.config.T
     assert result["theta_history"].shape == (21, T, 2)
     assert result["validation_iterations"].numel() == result["validation_J"].numel() > 0

@@ -19,11 +19,11 @@ choices:
     estimate the population law when flows includes "particle".
 
 MAIN doesn't sweep the full budget_modes x flows x horizons cartesian
-product (12 combinations) — only 5 of them are actually interesting (see
+product (12 combinations) — only 4 of them are actually interesting (see
 `groups`'s inline comment on MAIN below); `scripts.train.list_experiments`
 reads `groups` when a config sets it, in place of the cartesian product.
 mfreinforce ignores budget_mode entirely (fixed n_aux/B, below), so of
-MAIN's 5 groups only 4 are distinct mfreinforce training problems —
+MAIN's 4 groups only 3 are distinct mfreinforce training problems —
 `scripts.train.run_all`/`--materialize-duplicates` handle that dedup
 generically, not specific to this config.
 
@@ -140,13 +140,13 @@ MAIN = TwoStateRunConfig(
     groups=(
         ("equal_parameters", "exact", 2),
         ("equal_budget", "exact", 2),
-        ("equal_budget", "particle", 2),
         ("equal_budget", "particle", 5),
         ("equal_budget", "particle", 10),
-    ),  # 5 of the 12 (budget_mode, flow, T) combinations the coverage fields above would cartesian-product into:
-    # equal_parameters is only interesting at the base horizon under the exact flow (comparing budget regimes and
-    # comparing flows are each only interesting once, not crossed with the full horizon sweep too); equal_budget's
-    # particle-flow horizon sweep is the one comparison that needs all three horizons.
+    ),  # 4 of the 12 (budget_mode, flow, T) combinations the coverage fields above would cartesian-product into:
+    # the exact flow is only run at the base horizon T=2, where it carries the equal_parameters vs equal_budget
+    # comparison; the particle flow (the one every subsequent benchmark uses) carries the longer horizons T in
+    # {5, 10}. Note this leaves no (budget_mode, T) pair run under *both* flows, so exact vs particle is not
+    # isolated at a fixed horizon here — dropped deliberately, this grid is the one requested for the paid run.
     n_train=10_000,
     seeds=(0, 1, 2, 3, 4),
 )

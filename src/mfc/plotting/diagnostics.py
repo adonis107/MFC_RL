@@ -14,9 +14,9 @@ alongside it.
 from __future__ import annotations
 
 import torch
-from matplotlib.ticker import MaxNLocator
+from matplotlib.ticker import LogLocator, MaxNLocator, PercentFormatter, ScalarFormatter
 
-from .style import INK, apply_style, color_for, new_figure, style_legend
+from .style import apply_style, color_for, new_figure, style_legend
 
 
 def _fig_ax(ax, *, figsize=(6.0, 4.0)):
@@ -35,6 +35,21 @@ def _integer_xaxis(ax):
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
 
 
+def _set_probability_axis(ax):
+    ax.set_ylim(0.0, 1.0)
+    ax.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=0))
+
+
+def _maybe_log_lambda_axis(ax, values):
+    positive = [float(v) for v in values if float(v) > 0.0]
+    if len(positive) == len(values) and len(positive) >= 3 and max(positive) / min(positive) >= 4.0:
+        ax.set_xscale("log")
+        ax.xaxis.set_major_locator(LogLocator(base=10, subs=(1.0, 2.0, 5.0)))
+        formatter = ScalarFormatter()
+        formatter.set_scientific(False)
+        ax.xaxis.set_major_formatter(formatter)
+
+
 def plot_validation_curve(runs: list[dict], *, optimal_J: float | None = None, ax=None):
     """
     Evolution of the validation objective with training steps (context.md:
@@ -45,6 +60,9 @@ def plot_validation_curve(runs: list[dict], *, optimal_J: float | None = None, a
     name instead — grouping on `alg` too, not just `lam`, keeps several
     such algorithms compared side by side from colliding into one averaged
     line), with seeds sharing a group averaged and shown as a +-1 std band.
+    When several algorithms *do* carry a lambda (the continuous benchmarks,
+    where both compared algorithms are trained on the perturbed process),
+    the label names both, so the legend still identifies each line.
     `optimal_J`, if given (e.g. `simplex.exact_objective` at
     `env.optimal_theta()`), is drawn as a reference line.
     """
@@ -53,22 +71,23 @@ def plot_validation_curve(runs: list[dict], *, optimal_J: float | None = None, a
     for r in runs:
         groups.setdefault((r.get("alg", "run"), r["lam"]), []).append(r)
 
-    for i, key in enumerate(sorted(groups, key=lambda k: (k[1] is None, k[1], k[0]))):
+    several_algs = len({alg for alg, _ in groups}) > 1
+    for key in sorted(groups, key=lambda k: (k[1] is None, k[1], k[0])):
         alg, lam = key
         group = groups[key]
         iters = _cpu(group[0]["validation_iterations"])
         J = torch.stack([g["validation_J"] for g in group])  # (n_seeds, K)
         mean, std = _cpu(J.mean(dim=0)), _cpu(J.std(dim=0))
-        color = color_for(i)
-        label = f"λ={lam}" if lam is not None else alg
-        ax.plot(iters, mean, color=color, linewidth=2, label=label)
+        label = alg if lam is None else (f"{alg} λ={lam}" if several_algs else f"λ={lam}")
+        (line,) = ax.plot(iters, mean, label=label)
         if len(group) > 1:
-            ax.fill_between(iters, mean - std, mean + std, color=color, alpha=0.15, linewidth=0)
+            ax.fill_between(iters, mean - std, mean + std, color=line.get_color(), alpha=0.2)
 
     if optimal_J is not None:
-        ax.axhline(optimal_J, color=INK["muted"], linestyle="--", linewidth=1.5, label="optimal")
+        ax.axhline(optimal_J, color="0.15", linestyle="--", linewidth=1.4, label="optimal")
 
-    apply_style(ax, xlabel="training iteration", ylabel="validation objective J")
+    apply_style(ax, xlabel="training iteration", ylabel="validation objective")
+    _integer_xaxis(ax)
     style_legend(ax)
     return fig, ax
 
@@ -91,15 +110,15 @@ def plot_state_distribution(mu_flow, *, target_law=None, optimal_flow=None, stat
     labels = state_labels or [f"state {x}" for x in range(n_states)]
     t = range(T1)
     for x in range(n_states):
-        color = color_for(x)
-        ax.plot(t, mu_flow[:, x], color=color, linewidth=2, marker="o", markersize=5, label=labels[x])
+        (line,) = ax.plot(t, mu_flow[:, x], marker="o", label=labels[x])
+        color = line.get_color()
         if optimal_flow is not None:
-            ax.plot(t, optimal_flow[:, x], color=color, linewidth=1.5, linestyle="--", alpha=0.7)
+            ax.plot(t, optimal_flow[:, x], color=color, linestyle="--", alpha=0.8)
         if target_law is not None:
-            ax.axhline(target_law[x].item(), color=color, linestyle=":", linewidth=1, alpha=0.5)
+            ax.axhline(target_law[x].item(), color=color, linestyle=":", alpha=0.8)
 
-    apply_style(ax, xlabel="t", ylabel="P(X_t = x)")
-    ax.set_ylim(-0.02, 1.02)
+    apply_style(ax, xlabel="time step", ylabel="population share")
+    _set_probability_axis(ax)
     _integer_xaxis(ax)
     style_legend(ax)
     return fig, ax
@@ -116,13 +135,13 @@ def plot_population_fractions(series: dict, *, ax=None):
     `series`: {name: tensor of shape (T+1,)}, one line each.
     """
     fig, ax = _fig_ax(ax)
-    for i, (name, values) in enumerate(series.items()):
+    for name, values in series.items():
         values = _cpu(values)
         t = range(len(values))
-        ax.plot(t, values, color=color_for(i), linewidth=2, marker="o", markersize=5, label=name)
+        ax.plot(t, values, marker="o", label=name)
 
-    apply_style(ax, xlabel="t", ylabel="fraction")
-    ax.set_ylim(-0.02, 1.02)
+    apply_style(ax, xlabel="time step", ylabel="population share")
+    _set_probability_axis(ax)
     _integer_xaxis(ax)
     style_legend(ax)
     return fig, ax
@@ -145,11 +164,12 @@ def plot_distribution_comparison(distributions: dict, *, state_labels=None, ax=N
     for i, name in enumerate(names):
         values = _cpu(distributions[name])
         offsets = [p + (i - (len(names) - 1) / 2) * width for p in positions]
-        ax.bar(offsets, values, width=width * 0.9, color=color_for(i), label=name)
+        ax.bar(offsets, values, width=width * 0.9, label=name)
 
     ax.set_xticks(list(positions))
     ax.set_xticklabels(labels)
-    apply_style(ax, xlabel="state", ylabel="P(X = x)")
+    apply_style(ax, xlabel="state", ylabel="population share")
+    _set_probability_axis(ax)
     style_legend(ax)
     return fig, ax
 
@@ -172,10 +192,11 @@ def plot_objective_gap(gaps_by_lambda: dict[float, dict], *, ax=None):
     means = [gaps_by_lambda[lam]["J_lambda_mean"].item() for lam in lambdas]
     ses = [gaps_by_lambda[lam]["J_lambda_se"].item() for lam in lambdas]
 
-    ax.plot(lambdas, Js, color=INK["muted"], linestyle="--", linewidth=1.5, marker="o", markersize=5, label="J (exact, at that λ's θ)")
-    ax.errorbar(lambdas, means, yerr=ses, color=color_for(0), linewidth=2, marker="o", markersize=6, capsize=3, label="J^λ (Monte Carlo)")
+    ax.plot(lambdas, Js, linestyle="--", marker="o", label="J (exact, at that λ's θ)")
+    ax.errorbar(lambdas, means, yerr=ses, marker="o", capsize=3, label="J^λ (Monte Carlo)")
 
-    apply_style(ax, xlabel="λ", ylabel="objective")
+    _maybe_log_lambda_axis(ax, lambdas)
+    apply_style(ax, xlabel="perturbation scale λ", ylabel="objective")
     style_legend(ax)
     return fig, ax
 
@@ -195,14 +216,14 @@ def plot_gradient_diagnostics(gd_by_lambda: dict[float, dict], *, component_labe
     for i in range(D):
         bias = [gd_by_lambda[lam]["bias"][i].item() for lam in lambdas]
         std = [gd_by_lambda[lam]["std"][i].item() for lam in lambdas]
-        color = color_for(i)
-        ax.plot(lambdas, bias, color=color, linewidth=2, marker="o", markersize=6, label=labels[i])
+        (line,) = ax.plot(lambdas, bias, marker="o", label=labels[i])
         lo = [b - s for b, s in zip(bias, std)]
         hi = [b + s for b, s in zip(bias, std)]
-        ax.fill_between(lambdas, lo, hi, color=color, alpha=0.15, linewidth=0)
+        ax.fill_between(lambdas, lo, hi, color=line.get_color(), alpha=0.2)
 
-    ax.axhline(0.0, color=INK["axis"], linewidth=1)
-    apply_style(ax, xlabel="λ", ylabel="gradient bias (±1 std)")
+    ax.axhline(0.0, color="0.25", linewidth=1.0)
+    _maybe_log_lambda_axis(ax, lambdas)
+    apply_style(ax, xlabel="perturbation scale λ", ylabel="gradient bias (band: ±1 std)")
     style_legend(ax)
     return fig, ax
 
@@ -222,12 +243,13 @@ def plot_theta_diagnostics(theta_by_lambda: dict[float, dict], *, optimal_theta=
     for i in range(D):
         mean = [theta_by_lambda[lam]["mean"][i].item() for lam in lambdas]
         std = [theta_by_lambda[lam]["std"][i].item() for lam in lambdas]
-        color = color_for(i)
-        ax.errorbar(lambdas, mean, yerr=std, color=color, linewidth=2, marker="o", markersize=6, capsize=3, label=labels[i])
+        container = ax.errorbar(lambdas, mean, yerr=std, marker="o", capsize=3, label=labels[i])
         if optimal_theta is not None:
-            ax.axhline(optimal_theta[i].item(), color=color, linestyle="--", linewidth=1.5, alpha=0.7, label=f"{labels[i]} (optimal)")
+            color = container.lines[0].get_color()
+            ax.axhline(optimal_theta[i].item(), color=color, linestyle="--", alpha=0.8, label=f"{labels[i]} (optimal)")
 
-    apply_style(ax, xlabel="λ", ylabel="learned θ (mean ± std across seeds)")
+    _maybe_log_lambda_axis(ax, lambdas)
+    apply_style(ax, xlabel="perturbation scale λ", ylabel="learned θ (mean ± std across seeds)")
     style_legend(ax)
     return fig, ax
 
@@ -248,11 +270,11 @@ def plot_policy_error(errors_by_lambda: dict[float, object], *, state_labels=Non
     for x in range(n_states):
         vals = [errors_by_lambda[lam][x].item() for lam in lambdas]
         offsets = [p + (x - (n_states - 1) / 2) * width for p in positions]
-        ax.bar(offsets, vals, width=width * 0.9, color=color_for(x), label=labels[x])
+        ax.bar(offsets, vals, width=width * 0.9, label=labels[x])
 
     ax.set_xticks(list(positions))
     ax.set_xticklabels([str(lam) for lam in lambdas])
-    apply_style(ax, xlabel="λ", ylabel="policy error |π^θ - π*|")
+    apply_style(ax, xlabel="perturbation scale λ", ylabel="mean absolute policy error")
     style_legend(ax)
     return fig, ax
 
@@ -270,13 +292,13 @@ def plot_perturbation_coverage(results: list[dict], lam: float, *, mu_labels=Non
     maxes = [r["max_dTV"].item() for r in results]
     width = 0.35
 
-    ax.bar([p - width / 2 for p in positions], means, width=width, color=color_for(0), label="mean d_TV")
-    ax.bar([p + width / 2 for p in positions], maxes, width=width, color=color_for(1), label="max d_TV")
-    ax.axhline(lam, color=INK["muted"], linestyle="--", linewidth=1.5, label=f"λ={lam} bound")
+    ax.bar([p - width / 2 for p in positions], means, width=width, label="mean d_TV")
+    ax.bar([p + width / 2 for p in positions], maxes, width=width, label="max d_TV")
+    ax.axhline(lam, color="0.15", linestyle="--", linewidth=1.4, label=f"λ={lam} bound")
 
     ax.set_xticks(list(positions))
     ax.set_xticklabels(labels)
-    apply_style(ax, xlabel="population law", ylabel="d_TV(M^λ, μ)")
+    apply_style(ax, xlabel="population law", ylabel="total variation distance")
     style_legend(ax)
     return fig, ax
 
@@ -291,10 +313,14 @@ def plot_generalization(results: list[dict], *, ax=None):
     fig, ax = _fig_ax(ax)
     names = [r["name"] for r in results]
     values = [r["J"].item() for r in results]
-    ax.bar(range(len(names)), values, color=[color_for(i) for i in range(len(names))])
+    ax.bar(range(len(names)), values, color=[color_for(0)] + [color_for(1)] * max(0, len(names) - 1))
+    if values:
+        ax.axhline(values[0], color="0.25", linestyle="--", linewidth=1.2, label=f"baseline: {values[0]:.3g}")
     ax.set_xticks(range(len(names)))
     ax.set_xticklabels(names, rotation=30, ha="right")
-    apply_style(ax, ylabel="J (no retraining)")
+    apply_style(ax, ylabel="objective (no retraining)")
+    if values:
+        style_legend(ax)
     return fig, ax
 
 
@@ -308,11 +334,11 @@ def plot_trajectories(learned, optimal=None, *, ax=None):
     learned = _cpu(learned)
     optimal = _cpu(optimal)
     t = range(len(learned))
-    ax.step(t, learned, where="mid", color=color_for(0), linewidth=2, marker="o", markersize=6, label="learned")
+    ax.step(t, learned, where="post", marker="o", label="learned")
     if optimal is not None:
-        ax.step(t, optimal, where="mid", color=color_for(1), linewidth=2, marker="s", markersize=6, alpha=0.8, label="optimal")
+        ax.step(t, optimal, where="post", marker="s", alpha=0.8, label="optimal")
 
-    apply_style(ax, xlabel="t", ylabel="state")
+    apply_style(ax, xlabel="time step", ylabel="state")
     _integer_xaxis(ax)
     style_legend(ax)
     return fig, ax
@@ -330,15 +356,15 @@ def plot_gaussian_flow(mu, Sigma, *, optimal_mu=None, optimal_Sigma=None, label=
     mu, Sigma = _cpu(mu), _cpu(Sigma)
     std = Sigma.clamp_min(0).sqrt()
     t = range(len(mu))
-    ax.plot(t, mu, color=color_for(0), linewidth=2, marker="o", markersize=5, label=label)
-    ax.fill_between(t, mu - std, mu + std, color=color_for(0), alpha=0.15, linewidth=0)
+    (line,) = ax.plot(t, mu, marker="o", label=label)
+    ax.fill_between(t, mu - std, mu + std, color=line.get_color(), alpha=0.2)
     if optimal_mu is not None:
         optimal_mu, optimal_Sigma = _cpu(optimal_mu), _cpu(optimal_Sigma)
         optimal_std = optimal_Sigma.clamp_min(0).sqrt()
-        ax.plot(t, optimal_mu, color=color_for(1), linewidth=2, linestyle="--", marker="s", markersize=5, label=optimal_label)
-        ax.fill_between(t, optimal_mu - optimal_std, optimal_mu + optimal_std, color=color_for(1), alpha=0.1, linewidth=0)
+        (optimal_line,) = ax.plot(t, optimal_mu, linestyle="--", marker="s", label=optimal_label)
+        ax.fill_between(t, optimal_mu - optimal_std, optimal_mu + optimal_std, color=optimal_line.get_color(), alpha=0.15)
 
-    apply_style(ax, xlabel="t", ylabel="X_t (mean ± 1 std)")
+    apply_style(ax, xlabel="time step", ylabel="state mean with ±1 std band")
     _integer_xaxis(ax)
     style_legend(ax)
     return fig, ax
@@ -358,12 +384,11 @@ def plot_lq_theta(theta, *, optimal_theta=None, ax=None):
     t = range(theta.shape[0])
     labels = ["θ^1 (self gain)", "θ^2 (population gain)"]
     for i in range(2):
-        color = color_for(i)
-        ax.plot(t, theta[:, i], color=color, linewidth=2, marker="o", markersize=5, label=labels[i])
+        (line,) = ax.plot(t, theta[:, i], marker="o", label=labels[i])
         if optimal_theta is not None:
-            ax.plot(t, _cpu(optimal_theta)[:, i], color=color, linewidth=1.5, linestyle="--", alpha=0.7)
+            ax.plot(t, _cpu(optimal_theta)[:, i], color=line.get_color(), linestyle="--", alpha=0.8)
 
-    apply_style(ax, xlabel="t", ylabel="theta_t")
+    apply_style(ax, xlabel="time step", ylabel="policy parameter value")
     _integer_xaxis(ax)
     style_legend(ax)
     return fig, ax
@@ -383,11 +408,13 @@ def plot_horizon_scaling(
     fig, ax = _fig_ax(ax)
     xs = sorted(metric_by_T)
     values = [metric_by_T[x] for x in xs]
-    ax.plot(xs, values, color=color_for(color_index), linewidth=2, marker="o", markersize=6, label=label)
+    ax.plot(xs, values, color=color_for(color_index), marker="o", label=label)
 
     apply_style(ax, xlabel=xlabel, ylabel=ylabel)
     if integer_xaxis:
         _integer_xaxis(ax)
+    else:
+        _maybe_log_lambda_axis(ax, xs)
     if label:
         style_legend(ax)
     return fig, ax

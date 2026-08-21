@@ -9,8 +9,8 @@ objective J^lambda(theta), its exact policy gradient, and the unperturbed
 implements the reference's forward moment recursion, closed-form objective,
 adjoint gradient, and Riccati optimum directly — no Monte Carlo estimation
 is needed to train "exactly". A stochastic rollout is provided separately,
-only for the classical-REINFORCE ablation and trajectory diagnostics
-(see `mfc.algorithms.lq`).
+for the model-free algorithms (`mfc.algorithms.continuous_simplex`,
+`mfc.algorithms.continuous_reinforce`) and for trajectory diagnostics.
 
 Model (LQ_framework.tex, Secs. 1-3). State and action spaces are R. The
 initial law is X_0 ~ N(mu0, Sigma0); the state law m_t^theta is Gaussian at
@@ -36,8 +36,8 @@ this benchmark has no separate validation horizon.
 
 Everything below is a *cost* to minimize (matching the reference's own
 notation directly), not a reward to maximize like the rest of this repo —
-see `mfc.algorithms.lq`'s module docstring for the resulting sign
-convention.
+hence `MAXIMIZE = False`, which is where `mfc.algorithms.continuous.train`
+reads the resulting sign convention from.
 """
 
 from __future__ import annotations
@@ -50,24 +50,24 @@ import torch
 @dataclass(frozen=True)
 class LQConfig:
     """Model parameters. Defaults are chosen so the mean-field coupling
-    actually matters: `c` is comparable to `a` (the population feeds back
-    into the transition almost as strongly as the agent's own state), and
-    `kappa`/`kappa_T` are comparable to (or larger than) `q`/`q_T` (the
-    population's mean is penalized at least as heavily as the agent's own
+    dominates the comparison: `c` is at least as large as `a` (the population
+    feeds back into the transition as strongly as the agent's own state),
+    and `kappa`/`kappa_T` are deliberately larger than `q`/`q_T` (the
+    population's mean is penalized more heavily than the agent's own
     deviation), with a nonzero `mu0` so there is a real population mean to
     control from the start. See `tests/test_lq.py` for a direct numeric
     check that the mean-field coupling changes the optimal policy and value."""
 
     a: float = 0.9  # self transition coefficient
     b: float = 1.0  # control effectiveness
-    c: float = 0.8  # mean-field feedback in the transition kernel
+    c: float = 1.0  # mean-field feedback in the transition kernel
     sigma: float = 0.3  # state noise std
 
     q: float = 1.0  # running state cost
     r: float = 0.1  # running control cost
     q_T: float = 5.0  # terminal state cost
-    kappa: float = 2.0  # running mean-field coupling cost (reference's gamma)
-    kappa_T: float = 5.0  # terminal mean-field coupling cost (reference's gamma_T)
+    kappa: float = 4.0  # running mean-field coupling cost (reference's gamma)
+    kappa_T: float = 10.0  # terminal mean-field coupling cost (reference's gamma_T)
 
     tau: float = 0.2  # policy exploration std
     rho: float = 0.3  # perturbation std
@@ -83,6 +83,8 @@ class LQ:
     perturbation scale `lambda`; there is no discrete state space, so this
     class holds only `config`/`dtype`/`device` (no `n_states`/`n_actions`
     like `mfc.algorithms`'s discrete environment contract)."""
+
+    MAXIMIZE = False  # J^lambda here is a cost: `mfc.algorithms.continuous.train` descends
 
     def __init__(
         self,
@@ -218,6 +220,20 @@ class LQ:
 
         return theta_star
 
+    def policy_features(self, t: int, x: torch.Tensor, M: torch.Tensor) -> torch.Tensor:
+        """
+        phi_t(x,m), the feature vector of the Gaussian feedback policy:
+        pi_t^theta(.|x,m) = N(theta_t . phi_t(x,m), tau^2). Here the policy
+        mean is theta_t^1*x + theta_t^2*mbar, so phi_t(x,mbar) = (x, mbar).
+        `t` is accepted (unused: these features are time-homogeneous) for
+        the contract shared with `mfc.environments.portfolio.Portfolio
+        .policy_features`, which `mfc.algorithms._continuous.policy_score`
+        uses to build grad_theta log p_t^theta generically. Returns shape
+        (*x.shape, 2).
+        """
+        del t
+        return torch.stack(torch.broadcast_tensors(x, M), dim=-1)
+
     def rollout(
         self,
         theta: torch.Tensor,
@@ -226,22 +242,38 @@ class LQ:
         *,
         generator: torch.Generator | None = None,
     ) -> dict[str, torch.Tensor]:
-        """Simulate B i.i.d. particles under the lambda-perturbed dynamics,
-        using the deterministic exact mean flow mu_t^{theta,0} (Sec. 2.2's
-        "assume m_t^theta is deterministic") as the population argument at
-        every step — one shared (zeta_t,beta_t) draw per t, not per
-        particle, matching the reference's randomization of the whole
-        population law. `theta` is fully detached throughout (both for
-        `mu_flow` and for sampling `alpha`): every returned tensor is a
-        fixed constant with no gradient path to `theta`, so
-        `mfc.algorithms.lq.reinforce_step` can score the *sampled* alpha
-        against the (separately attached) theta — mirroring the discrete
-        algorithms' `sample_actions` (always detached) vs. `policy_score`
-        (attached) split; scoring against the *same* attached theta used to
-        draw the sample would make alpha-means cancel identically to a
-        theta-independent constant, silently zeroing the estimator. Returns
-        X (T+1,B), alpha (T,B), mu_hat (T+1,), running_cost (T,B),
-        terminal_cost (B,)."""
+        """Simulate B i.i.d. replicas of the lambda-perturbed system, each
+        with its own perturbation draw (zeta_t^b,beta_t^b) at every t, so
+        that the randomized population argument is
+        M_t^{lambda,theta,b} = (1+lambda*zeta_t^b)*mu_t^{theta,0} +
+        lambda*beta_t^b, centered on the deterministic nominal mean flow
+        mu_t^{theta,0} (Sec. 2.2's "assume m_t^theta is deterministic").
+        Independent per replica, not one draw shared across the batch: the
+        reference's trajectory factorization (continuous_state_space(2).tex,
+        eq. continuous-perturbed-trajectory-law) draws m_t ~ eta_t^{lambda,
+        theta} afresh along each trajectory, and both `mfc.algorithms
+        .continuous_simplex`'s auxiliary and main batches are i.i.d. samples
+        of that law. Each replica's *marginal* law is unchanged either way,
+        so every closed form here (`exact_objective`, `forward_moments`,
+        `exact_gradient`) describes this rollout exactly as before.
+
+        `theta` is fully detached throughout (both for `mu_flow` and for
+        sampling `alpha`): every returned tensor is a fixed constant with no
+        gradient path to `theta`, so the algorithms can score the *sampled*
+        alpha against theta — mirroring the discrete algorithms'
+        `sample_actions` (always detached) vs. `policy_score` (attached)
+        split; scoring against the *same* attached theta used to draw the
+        sample would make alpha-means cancel identically to a
+        theta-independent constant, silently zeroing the estimator.
+
+        Returns X (T+1,B), alpha (T,B), M (T+1,B), xi (T+1,B), mu (T+1,),
+        running (T,B), terminal (B,). `xi` is the standardized perturbation
+        (M_t = mu_t + lambda*rho*sqrt(mu_t^2+1)*xi_t with xi_t ~ N(0,1)),
+        which is what the perturbation score is expressed in; `mu` is the
+        nominal coordinate flow c_t^theta = mu_t^{theta,0}; `running`/
+        `terminal` are this environment's *costs* (its own sign convention,
+        matching `exact_objective`).
+        """
         cfg = self.config
         dtype, device = self.dtype, self.device
         T = theta.shape[0]
@@ -249,34 +281,33 @@ class LQ:
         mu_flow, _ = self.forward_moments(theta, lam=0.0)
 
         X = [cfg.mu0 + (cfg.Sigma0**0.5) * torch.randn(B, dtype=dtype, device=device, generator=generator)]
-        alpha, mu_hat, running_cost = [], [], []
-        for t in range(T):
-            zeta = cfg.rho * torch.randn((), dtype=dtype, device=device, generator=generator)
-            beta = cfg.rho * torch.randn((), dtype=dtype, device=device, generator=generator)
-            mu_hat_t = (1.0 + lam * zeta) * mu_flow[t] + lam * beta
-            mu_hat.append(mu_hat_t)
+        alpha, M, xi, running = [], [], [], []
+        for t in range(T + 1):
+            mu_t = mu_flow[t]
+            zeta = cfg.rho * torch.randn(B, dtype=dtype, device=device, generator=generator)
+            beta = cfg.rho * torch.randn(B, dtype=dtype, device=device, generator=generator)
+            M.append((1.0 + lam * zeta) * mu_t + lam * beta)
+            xi.append((zeta * mu_t + beta) / (cfg.rho * torch.sqrt(mu_t**2 + 1.0)))
+            if t == T:
+                break
 
             th1, th2 = theta[t, 0], theta[t, 1]
             eta = torch.randn(B, dtype=dtype, device=device, generator=generator)
-            alpha_t = th1 * X[t] + th2 * mu_hat_t + cfg.tau * eta
+            alpha_t = th1 * X[t] + th2 * M[t] + cfg.tau * eta
             alpha.append(alpha_t)
-            running_cost.append(cfg.q * X[t] ** 2 + cfg.r * alpha_t**2 + cfg.kappa * mu_hat_t**2)
+            running.append(cfg.q * X[t] ** 2 + cfg.r * alpha_t**2 + cfg.kappa * M[t] ** 2)
 
             eps = torch.randn(B, dtype=dtype, device=device, generator=generator)
-            X.append(cfg.a * X[t] + cfg.b * alpha_t + cfg.c * mu_hat_t + cfg.sigma * eps)
-
-        zeta_T = cfg.rho * torch.randn((), dtype=dtype, device=device, generator=generator)
-        beta_T = cfg.rho * torch.randn((), dtype=dtype, device=device, generator=generator)
-        mu_hat_T = (1.0 + lam * zeta_T) * mu_flow[T] + lam * beta_T
-        mu_hat.append(mu_hat_T)
-        terminal_cost = cfg.q_T * X[T] ** 2 + cfg.kappa_T * mu_hat_T**2
+            X.append(cfg.a * X[t] + cfg.b * alpha_t + cfg.c * M[t] + cfg.sigma * eps)
 
         return {
             "X": torch.stack(X),
             "alpha": torch.stack(alpha),
-            "mu_hat": torch.stack(mu_hat),
-            "running_cost": torch.stack(running_cost),
-            "terminal_cost": terminal_cost,
+            "M": torch.stack(M),
+            "xi": torch.stack(xi),
+            "mu": mu_flow,
+            "running": torch.stack(running),
+            "terminal": cfg.q_T * X[T] ** 2 + cfg.kappa_T * M[T] ** 2,
         }
 
     def init_theta(self, T: int | None = None, *, generator: torch.Generator | None = None) -> torch.Tensor:

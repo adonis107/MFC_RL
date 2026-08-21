@@ -14,22 +14,22 @@ def test_training_protocol_matches_reference():
         assert cfg.T_val == 50
         assert cfg.mu0_val == (0.25, 0.25, 0.25, 0.25)
         assert cfg.sigma == 1.0
-        assert cfg.lambdas == (0.1, 0.2, 0.4, 0.8)
+        assert cfg.lambdas == (0.1, 0.2, 0.4)  # trimmed from the reference's (0.1, 0.2, 0.4, 0.8); see the module docstring
         assert cfg.epsilon == 1.0
 
 
 def test_main_covers_the_full_comparison_surface():
-    """main sweeps 3 horizons (including the reference's own short T_train=3),
-    5 seeds, all 3 algorithms, but only budget_mode="equal_budget" and only
+    """main runs 5 seeds and all 3 algorithms at the reference's own single
+    short horizon T_train=3, and only budget_mode="equal_budget" / only
     flow="particle" (unlike two-state's main, which sweeps both budget modes
-    and both flows) — a deliberate narrower comparison surface for this
-    benchmark, per configs/cybersecurity.py's module docstring."""
+    and both flows, and is the only benchmark carrying the horizon sweep) —
+    a deliberate narrower comparison surface for this benchmark, per
+    configs/cybersecurity.py's module docstring."""
     assert set(MAIN.algorithms) == {"simplex", "mfreinforce", "reinforce"}
     assert len(MAIN.seeds) == 5
     assert len(set(MAIN.seeds)) == 5  # distinct seeds
     assert MAIN.n_train == 20_000
-    assert MAIN.horizons == (3, 6, 12)
-    assert 3 in MAIN.horizons  # the reference's own (short) training horizon
+    assert MAIN.horizons == (3,)  # the reference's own (short) training horizon, and the only one run
     assert MAIN.budget_modes == ("equal_budget",)
     assert MAIN.flows == ("particle",)
 
@@ -37,7 +37,7 @@ def test_main_covers_the_full_comparison_surface():
 def test_mid_and_smoke_are_single_seed_base_horizon_reductions_of_main():
     for cfg in (MID, SMOKE):
         assert cfg.seeds == (0,)
-        assert cfg.horizons == (3,)  # base horizon only, not main's full {3,6,12} sweep
+        assert cfg.horizons == MAIN.horizons  # (3,): the only horizon at any tier
         assert cfg.budget_modes == ("equal_parameters",)  # the simpler default, not main's equal_budget-only
         assert cfg.flows == ("exact",)  # the simpler default, not main's particle-only
         assert cfg.algorithms == MAIN.algorithms
