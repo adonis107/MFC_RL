@@ -17,7 +17,8 @@ from scripts.test import (
     continuous_perturbation_coverage,
     continuous_sensitivity_error,
     continuous_state_marginal_stability,
-    exact_coordinate_sensitivity,
+    exact_log_sigma_sensitivity,
+    exact_mean_sensitivity,
     exact_gradient,
     exact_sensitivity_flow,
     generalization_eval,
@@ -335,11 +336,11 @@ def test_run_diagnostics_skips_simplex_only_checks_for_other_algorithms(tmp_path
 # --------------------------------------------------------------------------
 
 
-def test_exact_coordinate_sensitivity_matches_finite_differences():
+def test_exact_mean_sensitivity_matches_finite_differences():
     env = LQ(device="cpu")
     T = 3
     theta = 0.2 * torch.randn(T, 2, dtype=env.dtype, device="cpu", generator=torch.Generator(device="cpu").manual_seed(0))
-    D = exact_coordinate_sensitivity(env, theta)
+    D = exact_mean_sensitivity(env, theta)
     assert D.shape == (T + 1, T, 2)
     assert D[0].abs().max().item() == 0.0  # mu_0 does not depend on theta
 
@@ -351,6 +352,27 @@ def test_exact_coordinate_sensitivity_matches_finite_differences():
                 bumped[i, j] += eps
                 fd = (env.forward_moments(bumped, 0.0)[0][t] - env.forward_moments(theta, 0.0)[0][t]) / eps
                 assert D[t, i, j].item() == pytest.approx(fd.item(), abs=1e-5)
+
+
+def test_exact_log_sigma_sensitivity_matches_finite_differences():
+    env = LQ(device="cpu")
+    T = 3
+    theta = 0.2 * torch.randn(T, 2, dtype=env.dtype, device="cpu", generator=torch.Generator(device="cpu").manual_seed(0))
+    K = exact_log_sigma_sensitivity(env, theta)
+    assert K.shape == (T + 1, T, 2)
+    assert K[0].abs().max().item() == 0.0  # Sigma_0 does not depend on theta
+
+    eps = 1e-6
+    _, Sigma = env.forward_moments(theta, 0.0)
+    log_sigma = 0.5 * torch.log(Sigma)
+    for t in (1, T):
+        for i in range(T):
+            for j in range(2):
+                bumped = theta.clone()
+                bumped[i, j] += eps
+                _, Sigma_bumped = env.forward_moments(bumped, 0.0)
+                fd = (0.5 * torch.log(Sigma_bumped[t]) - log_sigma[t]) / eps
+                assert K[t, i, j].item() == pytest.approx(fd.item(), abs=1e-5)
 
 
 def test_continuous_objective_gap_matches_the_closed_forms_and_scales_as_lambda_squared():

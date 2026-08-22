@@ -15,9 +15,10 @@ for the model-free algorithms (`mfc.algorithms.continuous_simplex`,
 Model (LQ_framework.tex, Secs. 1-3). State and action spaces are R. The
 initial law is X_0 ~ N(mu0, Sigma0); the state law m_t^theta is Gaussian at
 every t, with mean/variance (mu_t, Sigma_t) propagated deterministically.
-The perturbation randomizes the mean-field argument via the affine map
+The perturbation randomizes the Gaussian mean-field argument via the affine map
 T_t^lambda(x) = (1+lambda*zeta_t)x + lambda*beta_t, (zeta_t,beta_t) ~
-N(0,rho^2) x N(0,rho^2). The policy is Gaussian feedback,
+N(0,rho^2) x N(0,rho^2), producing
+N(M_t^{lambda,theta}, Sigma_t^{lambda,theta}). The policy is Gaussian feedback,
 pi_t^theta(.|x,m) = N(theta_t^1*x + theta_t^2*mbar, tau^2); the transition
 kernel is P_t(.|x,a,m) = N(a*x + b*alpha + c*mbar, sigma^2) (a,b,c are the
 model's own transition coefficients, unrelated to the RL discount factor
@@ -249,12 +250,11 @@ class LQ:
         lambda*beta_t^b, centered on the deterministic nominal mean flow
         mu_t^{theta,0} (Sec. 2.2's "assume m_t^theta is deterministic").
         Independent per replica, not one draw shared across the batch: the
-        reference's trajectory factorization (continuous_state_space(2).tex,
-        eq. continuous-perturbed-trajectory-law) draws m_t ~ eta_t^{lambda,
-        theta} afresh along each trajectory, and both `mfc.algorithms
-        .continuous_simplex`'s auxiliary and main batches are i.i.d. samples
-        of that law. Each replica's *marginal* law is unchanged either way,
-        so every closed form here (`exact_objective`, `forward_moments`,
+        Research_Project.tex's continuous LQ construction samples an affine
+        perturbation independently of the state and policy noises; the
+        auxiliary and main batches here are i.i.d. samples of that generated
+        law. Each replica's *marginal* law is unchanged either way, so every
+        closed form here (`exact_objective`, `forward_moments`,
         `exact_gradient`) describes this rollout exactly as before.
 
         `theta` is fully detached throughout (both for `mu_flow` and for
@@ -266,11 +266,14 @@ class LQ:
         sample would make alpha-means cancel identically to a
         theta-independent constant, silently zeroing the estimator.
 
-        Returns X (T+1,B), alpha (T,B), M (T+1,B), xi (T+1,B), mu (T+1,),
-        running (T,B), terminal (B,). `xi` is the standardized perturbation
+        Returns X (T+1,B), alpha (T,B), M (T+1,B), Sigma (T+1,B),
+        zeta/beta/xi (T+1,B), mu/Sigma_nominal (T+1,), running (T,B),
+        terminal (B,). `xi` is the standardized marginal-mean perturbation
         (M_t = mu_t + lambda*rho*sqrt(mu_t^2+1)*xi_t with xi_t ~ N(0,1)),
-        which is what the perturbation score is expressed in; `mu` is the
-        nominal coordinate flow c_t^theta = mu_t^{theta,0}; `running`/
+        kept for diagnostics and backward compatibility; the joint
+        perturbation score is expressed directly in `zeta` and `beta`.
+        `mu` and `Sigma_nominal` are the nominal moment flow
+        (mu_t^{theta,0}, Sigma_t^{theta,0}); `running`/
         `terminal` are this environment's *costs* (its own sign convention,
         matching `exact_objective`).
         """
@@ -278,15 +281,20 @@ class LQ:
         dtype, device = self.dtype, self.device
         T = theta.shape[0]
         theta = theta.detach()
-        mu_flow, _ = self.forward_moments(theta, lam=0.0)
+        mu_flow, Sigma_flow = self.forward_moments(theta, lam=0.0)
 
         X = [cfg.mu0 + (cfg.Sigma0**0.5) * torch.randn(B, dtype=dtype, device=device, generator=generator)]
-        alpha, M, xi, running = [], [], [], []
+        alpha, M, Sigma, zetas, betas, xi, running = [], [], [], [], [], [], []
         for t in range(T + 1):
             mu_t = mu_flow[t]
+            Sigma_t = Sigma_flow[t]
             zeta = cfg.rho * torch.randn(B, dtype=dtype, device=device, generator=generator)
             beta = cfg.rho * torch.randn(B, dtype=dtype, device=device, generator=generator)
-            M.append((1.0 + lam * zeta) * mu_t + lam * beta)
+            factor = 1.0 + lam * zeta
+            M.append(factor * mu_t + lam * beta)
+            Sigma.append(factor**2 * Sigma_t)
+            zetas.append(zeta)
+            betas.append(beta)
             xi.append((zeta * mu_t + beta) / (cfg.rho * torch.sqrt(mu_t**2 + 1.0)))
             if t == T:
                 break
@@ -304,8 +312,12 @@ class LQ:
             "X": torch.stack(X),
             "alpha": torch.stack(alpha),
             "M": torch.stack(M),
+            "Sigma": torch.stack(Sigma),
+            "zeta": torch.stack(zetas),
+            "beta": torch.stack(betas),
             "xi": torch.stack(xi),
             "mu": mu_flow,
+            "Sigma_nominal": Sigma_flow,
             "running": torch.stack(running),
             "terminal": cfg.q_T * X[T] ** 2 + cfg.kappa_T * M[T] ** 2,
         }

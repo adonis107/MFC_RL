@@ -7,7 +7,7 @@ from configs.lq import SMOKE as LQ_SMOKE
 from configs.twostate import MAIN as TWOSTATE_MAIN
 from configs.twostate import SMOKE as TWOSTATE_SMOKE
 from configs.twostate import TwoStateRunConfig
-from scripts.train import experiment_tag, list_continuous_experiments, list_experiments, materialize_duplicates, run_all, run_continuous
+from scripts.train import experiment_tag, list_continuous_experiments, list_experiments, make_simplex_step, materialize_duplicates, run_all, run_continuous
 
 
 def test_list_experiments_with_no_overrides_reproduces_the_full_config_grid():
@@ -116,6 +116,31 @@ def test_list_continuous_experiments_gives_reinforce_no_lambda_axis():
 
     with pytest.raises(ValueError, match="no perturbation scale"):
         list_continuous_experiments(LQ_SMOKE, "reinforce", lam=0.1)
+
+
+def test_simplex_step_uses_dedicated_aux_budget_when_present(monkeypatch):
+    class Cfg:
+        n_aux = 10
+        simplex_n_aux = 200
+        B = 500
+        sigma = 1.0
+
+        @staticmethod
+        def simplex_B_equal_budget(T):
+            return 15300
+
+    seen = {}
+
+    def fake_gradient_step(*args, **kwargs):
+        seen.update(kwargs)
+        return torch.zeros(1)
+
+    monkeypatch.setattr("scripts.train.simplex.gradient_step", fake_gradient_step)
+    step = make_simplex_step(Cfg(), flow="exact", budget_mode="equal_budget")
+    step(None, None, torch.zeros(1), torch.ones(2) / 2, T=5, lam=0.2, generator=torch.Generator())
+
+    assert seen["n_aux"] == 200
+    assert seen["B"] == 15300
 
 
 def test_run_continuous_records_reinforce_without_a_lambda(tmp_path):

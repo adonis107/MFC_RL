@@ -29,19 +29,15 @@ SAMPLE_MU0_FACTORIES. There is also no discount here (gamma=1, the default):
 unlike cybersecurity, the reference states no discount factor for this
 benchmark.
 
-Equal-budget allocation. As for cybersecurity, the reference itself uses
-identical (B, n_aux) for simplex and mfreinforce here — no budget-matching
-adjustment — but this repo adds an "equal_budget" mode as for two-state (see
-configs/twostate.py's module docstring for the full derivation): the
-complexity formulas are generic in (B, n_aux, T), so they are reused
-verbatim. `main` runs *only* budget_mode="equal_budget" and *only*
-flow="particle" (the empirical population-flow estimate, not the exact
-recursion), as cybersecurity's and advertising's do — two-state's `main` is
-the only place the exact flow and the equal-parameters regime are compared.
-This is the expensive one: at B=500, n_aux=10, T=5 the target is
-C_logit(5)/5 = 15500 per step, so simplex trains at B=15490 and reinforce at
-B=15500, ~31x the reference's own batch, against a ~76.6k-parameter policy
-MLP for n_train=100_000 iterations.
+Stabilized simplex. The raw reference n_aux=10 makes the simplex sensitivity
+estimate extremely noisy in the 10-state distribution-planning problem. To
+keep the comparison fair while reducing that variance, simplex alone uses a
+larger `simplex_n_aux`; under budget_mode="equal_budget" its main batch is
+reduced to keep
+    simplex_n_aux + B_simplex(T) = B_reinforce(T) = C_logit(T)/T.
+MF-REINFORCE remains the budget anchor with the reference's own B=500,
+n_aux=10. Gradient clipping is applied uniformly by `scripts.train` when
+`max_grad_norm` is set.
 """
 
 from __future__ import annotations
@@ -70,7 +66,9 @@ class DistributionPlanningRunConfig:
     # Monte Carlo budget and optimization (reference "Training and validation protocol")
     B: int = 500  # main trajectories per gradient step
     n_aux: int = 10  # auxiliary trajectories per step
+    simplex_n_aux: int = 200  # stabilized simplex sensitivity batch; see equal-budget formula below
     lr: float = 1e-4
+    max_grad_norm: float | None = 1.0
     n_train: int = 100_000  # training iterations
     validate_every: int = 10
 
@@ -87,8 +85,10 @@ class DistributionPlanningRunConfig:
         return self.logit_transitions(T) // T
 
     def simplex_B_equal_budget(self, T: int) -> int:
-        """B for simplex under budget_mode="equal_budget": n_aux stays fixed, the main batch absorbs the rest."""
-        return self.equal_budget_target(T) - self.n_aux
+        """B for simplex under budget_mode="equal_budget": simplex_n_aux gets
+        the first part of the matched budget, and the main batch absorbs the
+        remainder."""
+        return self.equal_budget_target(T) - self.simplex_n_aux
 
     def reinforce_B_equal_budget(self, T: int) -> int:
         """B for reinforce under budget_mode="equal_budget": no auxiliary batch, so the whole allocation is B."""

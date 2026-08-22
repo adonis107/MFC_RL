@@ -8,10 +8,11 @@ Environment contract. Generic over any continuous-state environment exposing
 
   - `config.tau` (policy std) and `config.rho` (perturbation std),
   - `forward_moments(theta, lam) -> (mu, Sigma)`, from which the nominal
-    coordinate flow c_t^theta = mu_t^{theta,0} is read,
+    moment flow (mu_t^{theta,0}, Sigma_t^{theta,0}) is read,
   - `policy_features(t, x, M) -> phi_t(x,m)` of shape (*x.shape, 2),
   - `rollout(theta, lam, B, *, generator) -> dict` with keys
-    X (T+1,B), alpha (T,B), M (T+1,B), xi (T+1,B), mu (T+1,),
+    X (T+1,B), alpha (T,B), M (T+1,B), Sigma (T+1,B),
+    zeta/beta/xi (T+1,B), mu/Sigma_nominal (T+1,),
     running (T,B), terminal (B,),
   - `exact_objective(theta, lam)` / `exact_gradient(theta, lam)` (used only
     by diagnostics, never by the estimators here),
@@ -22,9 +23,8 @@ policy is Gaussian and *linear in theta_t*,
 
     pi_t^theta(.|x,m) = N(theta_t . phi_t(x,m), tau^2),
 
-which is the setting of the reference's own continuous-state analysis
-(files/reference/continuous_state_space(2).tex; files/Research_Project.tex,
-Sec. "Policy gradient for the perturbed control problem in the LQ setting").
+which is the setting of Research_Project.tex's continuous-state LQ and
+portfolio benchmark sections.
 That linearity is what lets `policy_score` below be exact and closed-form
 rather than an autograd surrogate — and it removes, structurally, the trap
 documented in `LQ.rollout`: alpha is *data* here, sampled under a detached
@@ -94,11 +94,10 @@ def leave_one_out_baseline(G: torch.Tensor) -> torch.Tensor:
     """
     b_t^(b) = (1/(B-1)) sum_{b'!=b} G_t^(b'), the leave-one-out mean return
     (shape (T+1,B), matching `returns_to_go`'s G). Admissible as a baseline
-    (Remark "Admissible baselines", continuous_state_space(2).tex): it is
-    independent of trajectory b, and both the policy score and the
-    population-perturbation score are centered conditionally on everything
-    it depends on, so subtracting it leaves the estimator exactly unbiased
-    while removing the (large) contribution of E[G_t] to its variance.
+    it is independent of trajectory b, and both the policy score and the
+    affine population-perturbation score are centered conditionally on
+    everything it depends on, so subtracting it leaves the estimator exactly
+    unbiased while removing the large contribution of E[G_t] to its variance.
     Falls back to no baseline (all zeros) for B=1, where a leave-one-out
     mean does not exist.
     """

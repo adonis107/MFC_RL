@@ -66,9 +66,9 @@ The continuous-state benchmarks (`lq`, `portfolio`) take a different path
 through this module: `run_continuous` drives `mfc.algorithms.continuous.train`
 over a (T, lam, seed) grid with no budget_mode/flow axis, since their
 allocation is equal-budget by construction and their nominal population
-coordinate flow is exact (see `configs/lq.py`). Their algorithms are
-`mfc.algorithms.continuous.ALGORITHMS`: "simplex" (the continuous-state
-simplex-perturbed MF-REINFORCE estimator), "reinforce" (its ablation), and
+mean flow is exact (see `configs/lq.py`). Their algorithms are
+`mfc.algorithms.continuous.ALGORITHMS`: "simplex" (Research_Project.tex's
+continuous-state affine-perturbation MF-REINFORCE estimator), "reinforce" (its ablation), and
 "exact_gradient" (the closed-form oracle, trainable but not part of the
 comparison).
 
@@ -79,7 +79,9 @@ horizon-dependent (`cfg.simplex_B_equal_budget(T)` / `cfg.reinforce_B_equal_budg
 cost is quadratic in T (Algorithm 2's stagewise, non-reusable auxiliary
 batch), unlike simplex's linear T*(n_aux+B) or reinforce's T*B, so matching
 it takes a growing main batch as T grows. mfreinforce is itself the
-equal-budget anchor, so its own (n_aux, B) never change. Neither reinforce
+equal-budget anchor, so its own (n_aux, B) never change. A config may set
+`simplex_n_aux` to spend more of that matched budget on simplex's auxiliary
+sensitivity batch; the equal-budget main batch shrinks accordingly. Neither reinforce
 nor mfreinforce has a lambda-like perturbation scale swept by the config
 (mfreinforce's is the single fixed `cfg.epsilon`), so both ignore the
 config's lambda grid entirely rather than retraining once per (redundant)
@@ -211,11 +213,13 @@ def make_simplex_step(cfg, flow: str, budget_mode: str):
     theta, mu0, *, T, lam, generator) -> g_hat` contract `train_run` expects,
     closing over the config's perturbation std and choice of nominal-flow
     estimator (exact recursion vs. `particle_size` interacting particles,
-    per Assumption "Access to the nominal population flow"). n_aux is always
-    the reference value; B is `cfg.B` under "equal_parameters" or
+    per Assumption "Access to the nominal population flow"). n_aux is
+    `cfg.simplex_n_aux` when present, else `cfg.n_aux`; B is `cfg.B` under "equal_parameters" or
     `cfg.simplex_B_equal_budget(T)` under "equal_budget" (horizon-dependent
     — see configs/twostate.py's module docstring), resolved per T since the
     step function only learns T at call time."""
+    simplex_n_aux = getattr(cfg, "simplex_n_aux", cfg.n_aux)
+
     if flow == "exact":
         population_flow_fn = simplex.exact_population_flow
     elif flow == "particle":
@@ -237,7 +241,7 @@ def make_simplex_step(cfg, flow: str, budget_mode: str):
             theta,
             mu0,
             T=T,
-            n_aux=cfg.n_aux,
+            n_aux=simplex_n_aux,
             B=batch_size(T),
             lam=lam,
             sigma=cfg.sigma,
@@ -379,6 +383,9 @@ def train_run(
             g_hat = step_fn(env, action_probs_fn, theta, sample_mu0(generator), T=T, lam=lam, gamma=gamma, generator=generator)
             optimizer.zero_grad()
             theta.grad = -g_hat
+            max_grad_norm = getattr(cfg, "max_grad_norm", None)
+            if max_grad_norm is not None:
+                torch.nn.utils.clip_grad_norm_([theta], max_grad_norm)
             optimizer.step()
 
             if (m + 1) % history_stride == 0 or m == cfg.n_train - 1:
@@ -657,7 +664,7 @@ def list_continuous_experiments(
     No budget_mode/flow axis: the continuous configs have a single,
     always-equal-budget allocation (`cfg.n_aux`/`cfg.B` for simplex,
     `cfg.reinforce_B_equal_budget()` for reinforce — see `configs/lq.py`),
-    and the population coordinate flow is exact for both benchmarks, so
+    and the population mean flow is exact for both benchmarks, so
     there is no exact-vs-particle flow choice either."""
     horizons = [T] if T is not None else list(cfg.horizons)
     seeds = [seed] if seed is not None else list(cfg.seeds)

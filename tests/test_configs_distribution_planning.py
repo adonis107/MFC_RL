@@ -10,7 +10,9 @@ def test_training_protocol_matches_reference():
     for memory-practicality reasons (see the module docstring)."""
     for cfg in (MAIN, MID, SMOKE):
         assert cfg.n_aux == 10
+        assert cfg.simplex_n_aux == 200
         assert cfg.lr == 1e-4
+        assert cfg.max_grad_norm == 1.0
         assert cfg.validate_every == 10
         assert cfg.horizons == (5,)
         assert cfg.mu0_val == tuple([0.1] * 10)
@@ -25,9 +27,8 @@ def test_main_covers_the_full_comparison_surface():
     assert len(set(MAIN.seeds)) == 5  # distinct seeds
     assert MAIN.n_train == 100_000
     assert MAIN.B == 500  # the reference's own value; only mid/smoke shrink it
-    # only the budget-matched, particle-flow regime, as for cybersecurity and
-    # advertising; two-state's main is the only one comparing budget modes and
-    # flows against each other
+    # The main comparison stays fully sampled and equal-budget: simplex spends
+    # more of the same matched budget on its auxiliary sensitivity batch.
     assert MAIN.budget_modes == ("equal_budget",)
     assert MAIN.flows == ("particle",)
 
@@ -59,11 +60,11 @@ def test_equal_budget_targets_match_mfreinforces_horizon_dependent_cost():
             target = cfg.logit_transitions(T) // T
             assert cfg.equal_budget_target(T) == target
             assert cfg.reinforce_B_equal_budget(T) == target
-            assert cfg.simplex_B_equal_budget(T) == target - cfg.n_aux
-            assert cfg.n_aux + cfg.simplex_B_equal_budget(T) == cfg.reinforce_B_equal_budget(T)
+            assert cfg.simplex_B_equal_budget(T) == target - cfg.simplex_n_aux
+            assert cfg.simplex_n_aux + cfg.simplex_B_equal_budget(T) == cfg.reinforce_B_equal_budget(T)
 
     # concrete value at the reference horizon T=5, B=500, n_aux=10:
     # C_logit(5) = 500*5 + 500*10*5*6/2 = 2500 + 75000 = 77500; target = 15500
     assert MAIN.equal_budget_target(5) == 15500
     assert MAIN.reinforce_B_equal_budget(5) == 15500
-    assert MAIN.simplex_B_equal_budget(5) == 15490
+    assert MAIN.simplex_B_equal_budget(5) == 15300

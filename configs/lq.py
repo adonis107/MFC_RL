@@ -19,13 +19,11 @@ Budget. Unlike the discrete benchmarks there is no `budget_modes` sweep,
 because there is only one allocation worth running: equal budget
 (context.md, "For all subsequent environments and tests, we must use equal
 budget"). Simplex spends (`n_aux`+`B`)*T transitions per step — one
-auxiliary batch for the coordinate sensitivities, one main batch for the
-gradient (Remark "Linear per-iteration complexity",
-continuous_state_space(2).tex) — and reinforce gets the same total in a
-single main batch, `reinforce_B_equal_budget()`. There is no exact-vs-
-particle flow sweep either: the nominal coordinate flow c_t^theta =
-mu_t^theta is the exact forward moment recursion for both continuous
-benchmarks (Assumption "Access to the nominal population coordinates").
+auxiliary batch for the moment sensitivities, one main batch for the gradient
+— and reinforce gets the same total in a single main batch,
+`reinforce_B_equal_budget()`. There is no exact-vs-particle flow sweep
+either: the nominal mean flow mu_t^theta is the exact forward moment
+recursion for both continuous benchmarks.
 
 `lambdas` reuses this repo's canonical grid (`(0.05,0.1,0.2,0.4,0.8)`, as in
 `configs/cybersecurity.py`/`configs/distribution_planning.py`): LQ's own
@@ -47,7 +45,7 @@ baselines": the leave-one-out mean is independent of the trajectory it
 weights, and both scores are conditionally centered), so it changes no
 estimate's expectation. It matters a lot in practice here — LQ's costs are
 large and strictly positive, so E[G_t] contributes most of the raw
-estimator's variance: measured at a fixed theta with the exact sensitivity
+estimator's variance: measured at a fixed theta with the exact moment sensitivity
 flow, dropping it multiplies the gradient's standard deviation by ~6, and in
 training it is the difference between converging to ~1.01x J^0(theta*) and
 to ~2x.
@@ -66,11 +64,8 @@ and 1.4x without ever settling.
 T=10 is deliberately kept in `MAIN.horizons` even though simplex does *not*
 converge there at this budget (it lands around 1.3-2.9x J^0(theta*), behind
 reinforce's 1.05-1.11x). With a+c=1.9 the uncontrolled population mean is
-unstable, so the coordinate sensitivities D_t^theta grow geometrically with
-t and the perturbation score's variance grows with them — the "curse of
-time" of Remark "Horizon dependence" (continuous_state_space(2).tex), which
-is a statistical property of the estimator and not of its O((n_aux+B)*T)
-cost. Doubling the batch again does not fix it. That degradation *is* the
+unstable, so the moment sensitivities grow geometrically with t and
+the perturbation score's variance grows with them. That degradation *is* the
 horizon-scaling result context.md asks for, so it is reported rather than
 hidden by dropping the horizon.
 
@@ -98,7 +93,7 @@ class LQRunConfig:
 
     # Monte Carlo budget: simplex's own (n_aux, B) is the anchor, reinforce matches its total
     B: int = 400  # main trajectories per gradient step
-    n_aux: int = 200  # auxiliary trajectories per step (coordinate-sensitivity flow)
+    n_aux: int = 200  # auxiliary trajectories per step (moment-sensitivity flow)
     baseline: str | None = "loo"  # leave-one-out return baseline; see module docstring
 
     lr: float = 0.02

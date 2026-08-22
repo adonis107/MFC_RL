@@ -7,8 +7,9 @@ estimators (`mfc.algorithms.continuous_simplex`,
 `mfc.algorithms.continuous_reinforce`) are generic over the environment
 contract documented in `mfc.algorithms._continuous`:
 
-  - `"simplex"`: the continuous-state simplex-perturbed MF-REINFORCE
-    estimator — one auxiliary batch for the coordinate sensitivities, one
+  - `"simplex"`: the Research_Project.tex continuous-state affine-
+    perturbation MF-REINFORCE estimator — one auxiliary batch for mean and
+    log-standard-deviation sensitivities, one
     main batch for the perturbed policy gradient, (n_aux+B)*T transitions
     per step.
   - `"reinforce"`: the classical-REINFORCE ablation of the same estimator
@@ -86,7 +87,8 @@ def train(
     """
     Train theta by Adam on J^lambda(theta) — ascending or descending
     according to `env.MAXIMIZE` — using `algorithm`'s gradient estimate
-    (Algorithm "Linear-time continuous-state MF-REINFORCE" for "simplex").
+    (Research_Project.tex's continuous-state MF-REINFORCE construction for
+    "simplex").
     Validates every `validate_every` steps by computing the exact
     unperturbed objective J^0(theta), which for both continuous benchmarks
     is closed-form and free of Monte Carlo error, unlike every discrete

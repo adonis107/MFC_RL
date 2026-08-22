@@ -81,8 +81,12 @@ def test_rollout_shapes_and_per_replica_perturbation():
     assert out["X"].shape == (T + 1, 64)
     assert out["alpha"].shape == (T, 64)
     assert out["M"].shape == (T + 1, 64)  # one perturbation draw per replica, not one shared across the batch
+    assert out["Sigma"].shape == (T + 1, 64)
+    assert out["zeta"].shape == (T + 1, 64)
+    assert out["beta"].shape == (T + 1, 64)
     assert out["xi"].shape == (T + 1, 64)
     assert out["mu"].shape == (T + 1,)
+    assert out["Sigma_nominal"].shape == (T + 1,)
     assert out["running"].shape == (T, 64)
     assert out["terminal"].shape == (64,)
     for t in out.values():
@@ -91,15 +95,20 @@ def test_rollout_shapes_and_per_replica_perturbation():
 
 
 def test_rollout_standardized_perturbation_reproduces_the_population_argument():
-    """xi is exactly the standardization of M around the nominal coordinate:
+    """xi is exactly the standardization of M around the nominal mean:
     M_t = mu_t + lambda*rho*sqrt(mu_t^2+1)*xi_t, which is the form
-    `mfc.algorithms.continuous_simplex.perturbation_score` is written in."""
+    retained for diagnostics; the joint affine law also reconstructs
+    Sigma_t = (1+lambda*zeta_t)^2 Sigma_t^theta."""
     env = LQ()
     theta = 0.2 * torch.randn(env.config.T, 2, dtype=env.dtype, device=env.device)
     lam, rho = 0.3, env.config.rho
     out = env.rollout(theta, lam=lam, B=256, generator=torch.Generator(device=env.device).manual_seed(0))
     mu = out["mu"].unsqueeze(-1)
+    Sigma = out["Sigma_nominal"].unsqueeze(-1)
+    factor = 1.0 + lam * out["zeta"]
     assert torch.allclose(out["M"], mu + lam * rho * torch.sqrt(mu**2 + 1.0) * out["xi"])
+    assert torch.allclose(out["M"], factor * mu + lam * out["beta"])
+    assert torch.allclose(out["Sigma"], factor**2 * Sigma)
     assert out["xi"].mean().abs().item() < 0.2  # standard normal
     assert abs(out["xi"].std().item() - 1.0) < 0.2
 

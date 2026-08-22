@@ -3,12 +3,14 @@ Classical continuous-state REINFORCE, as a baseline for the "missing
 mean-field term" comparison (context.md) — the continuous-state counterpart
 of `mfc.algorithms.reinforce`.
 
-The perturbed policy gradient (Theorem "Perturbed policy-gradient formula",
-files/reference/continuous_state_space(2).tex) has two pieces: the direct
-policy score L_t, and the population-perturbation score S_t^{lambda,theta} =
-D_t^theta * h_t, which accounts for the population coordinate c_t^theta =
-mu_t^theta itself depending on theta (the agent's own influence on the
-population it is embedded in). Classical REINFORCE keeps only the first:
+The perturbed policy gradient in Research_Project.tex's "Continuous State
+Space" section has two pieces: the direct policy score L_t, and the
+population-law score grad_theta log q_t^{lambda,theta}. In the implemented
+joint Gaussian-law chart, that law score is
+D_t^theta h_t^m + K_t^theta h_t^sigma with
+D_t^theta = grad_theta mu_t^theta and
+K_t^theta = grad_theta log sigma_t^theta. Classical REINFORCE keeps only
+the first:
 
     g_hat_reinforce(theta) = (1/B) sum_b sum_{t<T} L_t^(b) * G_t^(b).
 

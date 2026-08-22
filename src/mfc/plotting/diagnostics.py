@@ -77,7 +77,7 @@ def plot_validation_curve(runs: list[dict], *, optimal_J: float | None = None, a
         group = groups[key]
         iters = _cpu(group[0]["validation_iterations"])
         J = torch.stack([g["validation_J"] for g in group])  # (n_seeds, K)
-        mean, std = _cpu(J.mean(dim=0)), _cpu(J.std(dim=0))
+        mean, std = _cpu(J.mean(dim=0)), _cpu(J.std(dim=0, unbiased=False))
         label = alg if lam is None else (f"{alg} λ={lam}" if several_algs else f"λ={lam}")
         (line,) = ax.plot(iters, mean, label=label)
         if len(group) > 1:

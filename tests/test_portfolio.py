@@ -76,12 +76,29 @@ def test_rollout_shapes_and_per_replica_perturbation():
     assert out["X"].shape == (T + 1, 64)
     assert out["alpha"].shape == (T, 64)
     assert out["M"].shape == (T + 1, 64)  # one perturbation draw per replica, not one shared across the batch
+    assert out["Sigma"].shape == (T + 1, 64)
+    assert out["zeta"].shape == (T + 1, 64)
+    assert out["beta"].shape == (T + 1, 64)
     assert out["xi"].shape == (T + 1, 64)
+    assert out["mu"].shape == (T + 1,)
+    assert out["Sigma_nominal"].shape == (T + 1,)
     assert out["running"].shape == (T, 64)  # identically zero: the mean-variance criterion is purely terminal
     assert not out["running"].any()
     assert out["terminal"].shape == (64,)
     for t in out.values():
         assert not t.requires_grad  # theta is detached throughout rollout
+
+
+def test_rollout_reconstructs_the_generated_gaussian_argument():
+    env = Portfolio()
+    theta = 0.2 * torch.randn(env.config.T, 2, dtype=env.dtype, device=env.device)
+    lam = 0.1
+    out = env.rollout(theta, lam=lam, B=256, generator=torch.Generator(device=env.device).manual_seed(0))
+    mu = out["mu"].unsqueeze(-1)
+    Sigma = out["Sigma_nominal"].unsqueeze(-1)
+    factor = 1.0 + lam * out["zeta"]
+    assert torch.allclose(out["M"], factor * mu + lam * out["beta"])
+    assert torch.allclose(out["Sigma"], factor**2 * Sigma)
 
 
 def test_sample_returns_gaussian_matches_configured_moments():

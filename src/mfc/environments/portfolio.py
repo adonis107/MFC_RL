@@ -29,10 +29,12 @@ Policy: pi_t^theta(.|x,m) = N(k_t*(x-mbar) + l_t, tau_t^2), theta =
 consequence: there is no separate validation horizon (see
 `mfc.environments.lq`'s module docstring for why).
 
-Perturbation: identical affine randomization of the mean-field argument as
-LQ (T_t^lambda(x) = (1+lambda*zeta_t)x + lambda*beta_t), applied to the
-wealth law's mean only (there is no "variance" of the mean-field argument
-used anywhere in the policy/dynamics here, unlike LQ's transition kernel).
+Perturbation: identical affine randomization of the Gaussian mean-field
+argument as LQ (T_t^lambda(x) = (1+lambda*zeta_t)x + lambda*beta_t),
+producing the generated pair (M_t^{lambda,theta}, Sigma_t^{lambda,theta}).
+The portfolio policy and terminal reward consume only the generated mean,
+but `mfc.algorithms.continuous_simplex` still scores the full generated-law
+chart from `Research_Project.tex`.
 
 Baseline parameters (reference "Training and evaluation"): T=10, X_0 ~
 N(1,0.04), s_t=1, r_bar_t=0.02, sigma_R_t=0.08, chi=10, tau_t=0.02, rho=1.
@@ -217,10 +219,11 @@ class Portfolio:
         """Simulate B i.i.d. replicas of the lambda-perturbed wealth
         dynamics, each with its own perturbation draw at every t (see
         `mfc.environments.lq.LQ.rollout`'s identical design, rationale and
-        detached-theta contract). Returns X (T+1,B), alpha (T,B), M (T+1,B),
-        xi (T+1,B), mu (T+1,), running (T,B), terminal (B,) — same keys as
-        `LQ.rollout`, but `running`/`terminal` are *rewards* here (this
-        environment's own sign convention, matching `exact_objective`), and
+        detached-theta contract). Returns X (T+1,B), alpha (T,B), M/Sigma
+        (T+1,B), zeta/beta/xi (T+1,B), mu/Sigma_nominal (T+1,), running
+        (T,B), terminal (B,) — same keys as `LQ.rollout`, but
+        `running`/`terminal` are *rewards* here (this environment's own sign
+        convention, matching `exact_objective`), and
         `running` is identically zero: the mean-variance criterion is purely
         terminal, g(x,m) = x - chi*(x-mbar)^2.
         """
@@ -228,15 +231,20 @@ class Portfolio:
         dtype, device = self.dtype, self.device
         T = theta.shape[0]
         theta = theta.detach()
-        mu_flow, _ = self.forward_moments(theta, lam=0.0)
+        mu_flow, Sigma_flow = self.forward_moments(theta, lam=0.0)
 
         X = [cfg.mu0 + (cfg.Sigma0**0.5) * torch.randn(B, dtype=dtype, device=device, generator=generator)]
-        alpha, M, xi = [], [], []
+        alpha, M, Sigma, zetas, betas, xi = [], [], [], [], [], []
         for t in range(T + 1):
             mu_t = mu_flow[t]
+            Sigma_t = Sigma_flow[t]
             zeta = cfg.rho * torch.randn(B, dtype=dtype, device=device, generator=generator)
             beta = cfg.rho * torch.randn(B, dtype=dtype, device=device, generator=generator)
-            M.append((1.0 + lam * zeta) * mu_t + lam * beta)
+            factor = 1.0 + lam * zeta
+            M.append(factor * mu_t + lam * beta)
+            Sigma.append(factor**2 * Sigma_t)
+            zetas.append(zeta)
+            betas.append(beta)
             xi.append((zeta * mu_t + beta) / (cfg.rho * torch.sqrt(mu_t**2 + 1.0)))
             if t == T:
                 break
@@ -253,8 +261,12 @@ class Portfolio:
             "X": torch.stack(X),
             "alpha": torch.stack(alpha),
             "M": torch.stack(M),
+            "Sigma": torch.stack(Sigma),
+            "zeta": torch.stack(zetas),
+            "beta": torch.stack(betas),
             "xi": torch.stack(xi),
             "mu": mu_flow,
+            "Sigma_nominal": Sigma_flow,
             "running": torch.zeros(T, B, dtype=dtype, device=device),
             "terminal": X[T] - cfg.chi * (X[T] - M[T]) ** 2,
         }

@@ -598,26 +598,51 @@ def rollout(env, action_probs_fn, theta: torch.Tensor, mu0: torch.Tensor, T: int
 #
 # The population law lives in P_2(R) and is perturbed by transport rather
 # than inside a simplex (see `mfc.algorithms.continuous_simplex`), so the
-# discrete diagnostics above are reformulated here around its coordinate
-# c_t^theta = mu_t^theta: sensitivities are grad_theta mu_t^theta rather than
-# grad_theta mu_t^theta(k), and perturbation size is measured in W_2 rather
-# than in total variation.
+# discrete diagnostics above are reformulated here around its generated
+# Gaussian moment chart (mu_t^theta, Sigma_t^theta): sensitivities are
+# grad_theta mu_t^theta and grad_theta log sigma_t^theta, and perturbation
+# size is measured in W_2 rather than in total variation.
 # --------------------------------------------------------------------------
 
 
-def exact_coordinate_sensitivity(env, theta: torch.Tensor) -> torch.Tensor:
+def exact_mean_sensitivity(env, theta: torch.Tensor) -> torch.Tensor:
     """
-    D_t^theta = grad_theta c_t^theta = grad_theta mu_t^theta, t=0,...,T, via
-    ordinary autograd through the environment's deterministic forward moment
-    recursion (`env.forward_moments(theta, 0.0)`). Ground truth for
-    `continuous_simplex.estimate_sensitivity_flow`'s single-batch forward
-    estimator; never used inside the model-free estimator itself
-    (differentiating the population dynamics is exactly what it avoids).
+    D_t^theta = grad_theta mu_t^theta, t=0,...,T, via ordinary autograd
+    through the environment's deterministic forward moment recursion
+    (`env.forward_moments(theta, 0.0)`). Ground truth for
+    `continuous_simplex.estimate_sensitivity_flow`; never used inside the
+    model-free estimator itself.
     Returns shape (T+1, T, 2) — one theta-shaped sensitivity per time index.
     """
     theta = theta.detach().requires_grad_(True)
     mu, _ = env.forward_moments(theta, 0.0)
     return torch.stack([torch.autograd.grad(mu[t], theta, retain_graph=True)[0] for t in range(theta.shape[0] + 1)]).detach()
+
+
+def exact_log_sigma_sensitivity(env, theta: torch.Tensor) -> torch.Tensor:
+    """
+    K_t^theta = grad_theta log sigma_t^theta, t=0,...,T, via autograd
+    through `env.forward_moments(theta, 0.0)`. Ground truth for the variance
+    side of `continuous_simplex.estimate_sensitivity_flow`.
+    Returns shape (T+1, T, 2).
+    """
+    theta = theta.detach().requires_grad_(True)
+    _, Sigma = env.forward_moments(theta, 0.0)
+    log_sigma = 0.5 * torch.log(Sigma)
+    return torch.stack([torch.autograd.grad(log_sigma[t], theta, retain_graph=True)[0] for t in range(theta.shape[0] + 1)]).detach()
+
+
+def exact_moment_sensitivity(env, theta: torch.Tensor) -> dict[str, torch.Tensor]:
+    """
+    Exact joint moment sensitivities for the Research_Project.tex generated
+    law chart: `mean` is grad mu_t and `log_sigma` is grad log sigma_t.
+    Evaluation oracle only; the training estimator computes these
+    model-free from auxiliary trajectories.
+    """
+    return {"mean": exact_mean_sensitivity(env, theta), "log_sigma": exact_log_sigma_sensitivity(env, theta)}
+
+
+exact_coordinate_sensitivity = exact_mean_sensitivity
 
 
 def continuous_objective_gap(env, theta: torch.Tensor, *, lam: float, n_samples: int, generator=None) -> dict:
@@ -672,9 +697,9 @@ def continuous_gradient_diagnostics(
                                                          missing mean-field
                                                          term for reinforce)
 
-    (Theorem "Bias and MSE of the gradient estimator",
-    continuous_state_space(2).tex), with `bias_se` the Monte Carlo standard
-    error of the estimated mean, so a real bias can be told from reps noise.
+    following Research_Project.tex's perturbation-bias vs Monte Carlo-error
+    split, with `bias_se` the Monte Carlo standard error of the estimated
+    mean, so a real bias can be told from reps noise.
     """
     theta = theta.detach()
     oracle = env.exact_gradient(theta, 0.0)
@@ -704,8 +729,8 @@ def continuous_gradient_diagnostics(
 def continuous_oracle_gradient_estimate(env, theta: torch.Tensor, *, lam: float, B: int, baseline=None, generator=None) -> torch.Tensor:
     """
     One draw of the oracle-sensitivity estimator: `continuous_simplex
-    .gradient_estimate` fed the *exact* coordinate sensitivities
-    (`exact_coordinate_sensitivity`) instead of the auxiliary plug-in
+    .gradient_estimate` fed the *exact* joint moment sensitivities
+    (`exact_moment_sensitivity`) instead of the auxiliary plug-in
     estimate. Its mean is grad J^lambda(theta) exactly, so averaging many
     draws and comparing against `env.exact_gradient(theta, lam)` isolates the
     Monte Carlo term (I) with no sensitivity-estimation term (II) present at
@@ -713,7 +738,7 @@ def continuous_oracle_gradient_estimate(env, theta: torch.Tensor, *, lam: float,
     discrete case.
     """
     theta = theta.detach()
-    D_exact = exact_coordinate_sensitivity(env, theta)
+    D_exact = exact_moment_sensitivity(env, theta)
     out = env.rollout(theta, lam, B, generator=generator)
     return continuous_simplex.gradient_estimate(env, theta, out, D_exact, lam, baseline=baseline)
 
@@ -722,7 +747,8 @@ def continuous_mean_field_term(env, theta: torch.Tensor, *, lam: float, B: int, 
     """
     The population-perturbation term alone,
 
-        sum_t S_t^{lambda,theta}(M_t) G_t = sum_t D_t^theta h_t G_t,
+        sum_t S_t^{lambda,theta}(M_t,Sigma_t) G_t
+        = sum_t (D_t^theta h_t^m + K_t^theta h_t^sigma) G_t,
 
     which is exactly what classical REINFORCE omits — and, since
     E[ghat_simplex] = grad J^lambda when the sensitivity flow is exact, also
@@ -739,7 +765,7 @@ def continuous_mean_field_term(env, theta: torch.Tensor, *, lam: float, B: int, 
     `relative_size` reports it against ||grad J^lambda(theta)||.
     """
     theta = theta.detach()
-    D_exact = exact_coordinate_sensitivity(env, theta)
+    D_exact = exact_moment_sensitivity(env, theta)
     samples = []
     for _ in range(reps):
         out = env.rollout(theta, lam, B, generator=generator)
@@ -762,37 +788,38 @@ def continuous_mean_field_term(env, theta: torch.Tensor, *, lam: float, B: int, 
 def continuous_sensitivity_error(env, theta: torch.Tensor, *, eta: float, n: int, reps: int, generator=None) -> dict:
     """
     Empirical bias/variance of `continuous_simplex.estimate_sensitivity_flow`
-    against the exact D_t^theta (`exact_coordinate_sensitivity`), from `reps`
-    independent auxiliary batches at fixed (eta, n). Validates the two
-    quantities the estimator's analysis is written in terms of: the smoothing
-    remainder R_t^{eta,theta} (eq. continuous-coordinate-smoothing-remainder),
-    which shrinks with eta, and the O(1/n) Monte Carlo error of the reusable
-    batch. Returns per-t `bias_norm`, `bias_se`, `variance` and `mse` (each
-    shape (T+1,)), plus their sums over t.
+    against the exact joint moment sensitivities (`exact_moment_sensitivity`),
+    from `reps` independent auxiliary batches at fixed (eta, n). This
+    validates the Research_Project.tex model-free moment-sensitivity
+    estimate: finite-eta perturbation bias plus the O(1/n) Monte Carlo error
+    of the reusable batch. Returns per-t `bias_norm`, `bias_se`, `variance`
+    and `mse` (each shape (T+1,)), plus their sums over t.
     """
     theta = theta.detach()
-    exact = exact_coordinate_sensitivity(env, theta)
+    exact = exact_moment_sensitivity(env, theta)
+    exact_flat = torch.cat([exact["mean"], exact["log_sigma"]], dim=-1)
 
-    total = torch.zeros_like(exact)
-    total_sq = torch.zeros_like(exact)
+    total = torch.zeros_like(exact_flat)
+    total_sq = torch.zeros_like(exact_flat)
     for _ in range(reps):
         sample = continuous_simplex.estimate_sensitivity_flow(env, theta, n, eta, generator=generator)
-        total += sample
-        total_sq += sample**2
+        sample_flat = torch.cat([sample["mean"], sample["log_sigma"]], dim=-1)
+        total += sample_flat
+        total_sq += sample_flat**2
 
     mean = total / reps
-    bias_norm = (mean - exact).flatten(1).norm(dim=-1)  # (T+1,)
+    bias_norm = (mean - exact_flat).flatten(1).norm(dim=-1)  # (T+1,)
     # Population (ddof=0) variance from the running moments, so that
     # mse = bias_norm**2 + variance holds exactly.
     variance = (total_sq / reps - mean**2).clamp_min(0.0).flatten(1).sum(dim=-1)
     return {
         "exact": exact,
-        "mean": mean,
+        "mean": {"mean": mean[..., : theta.shape[-1]], "log_sigma": mean[..., theta.shape[-1] :]},
         "bias_norm": bias_norm,
         "bias_se": (variance / reps).sqrt(),
         "variance": variance,
         "mse": bias_norm**2 + variance,
-        "total_bias_norm": (mean - exact).norm(),
+        "total_bias_norm": (mean - exact_flat).norm(),
         "total_mse": (bias_norm**2 + variance).sum(),
     }
 
@@ -807,16 +834,15 @@ def continuous_perturbation_coverage(env, theta: torch.Tensor, *, lam: float, n_
 
         W_2^2(M_t^lambda, mu_t) = lambda^2 (zeta*mu_t+beta)^2 + lambda^2 zeta^2 Sigma_t
 
-    exactly. The reference's own almost-sure bound (eq.
-    continuous-transport-W2-bound, with C_phi=1 for the affine directions
-    phi(x)=(x,1)) is
+    exactly. The Research_Project.tex affine perturbation gives the pathwise
+    bound
 
         W_2(M_t^lambda, mu_t) <= lambda*|Z_t|*sqrt(1+mu_t^2+Sigma_t),   Z_t=(zeta,beta),
 
     which `within_bound` checks on every single draw, exactly as the discrete
     check does for d_TV<=lambda. `mean_W2_sq` should match its closed form
-    lambda^2*rho^2*(mu_t^2+1+Sigma_t) — the O(lambda^2) of eq.
-    continuous-coordinate-W2-bound. One entry per t=0,...,T.
+    lambda^2*rho^2*(mu_t^2+1+Sigma_t), matching the O(lambda^2) perturbation
+    bias stated in Research_Project.tex. One entry per t=0,...,T.
     """
     theta = theta.detach()
     rho, dtype, device = env.config.rho, env.dtype, env.device
@@ -893,7 +919,7 @@ def run_continuous_diagnostics(env_name: str, alg_name: str, config_name: str, *
     saved run for this (env, alg, config), group by (T, lam), and compute the
     diagnostics that are beyond training scope — theta bias/variance across
     seeds against the known optimum, J^lambda vs J^0, gradient bias/std/MSE
-    against the exact oracles, sensitivity-estimator error, and the W_2
+    against the exact oracles, moment-sensitivity-estimator error, and the W_2
     perturbation-coverage check. The perturbation-dependent entries are
     skipped for a run with `lam=None` (reinforce, trained on the nominal
     process), whose gradient diagnostics are computed at lam=0. Saved to

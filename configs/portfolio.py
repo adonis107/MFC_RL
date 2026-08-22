@@ -32,10 +32,9 @@ baseline. Measured while building
 this module, neither more iterations (20_000 at lr=0.01 oscillates around
 the same plateau and ends no better) nor a larger step (lr=0.03 destabilizes)
 moves that floor; a 4x larger batch buys only ~0.02 of J for 2x the runtime.
-This is worth reporting in `notebooks/portfolio.ipynb` — it is exactly the
-MSE-vs-budget trade-off of Theorem "Bias and MSE of the gradient estimator"
-(continuous_state_space(2).tex) made visible — not something to hide by
-shrinking the reference's tau.
+This is worth reporting in `notebooks/portfolio.ipynb`: it is the
+MSE-vs-budget trade-off of the Research_Project.tex score-function estimator
+made visible, not something to hide by shrinking the reference's tau.
 
 Training and validation both use the environment's own fixed
 `PortfolioConfig.mu0`/`Sigma0` (no randomized-initial-law training protocol
@@ -61,7 +60,7 @@ class PortfolioRunConfig:
     # Monte Carlo budget: simplex's own (n_aux, B) is the anchor, reinforce matches its total.
     # Both are 5x this repo's usual sizes -- see the module docstring on tau=0.02.
     B: int = 1000  # main trajectories per gradient step
-    n_aux: int = 500  # auxiliary trajectories per step (coordinate-sensitivity flow)
+    n_aux: int = 500  # auxiliary trajectories per step (moment-sensitivity flow)
     baseline: str | None = "loo"  # leave-one-out return baseline; see configs/lq.py
 
     lr: float = 0.01
